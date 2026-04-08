@@ -60,3 +60,27 @@ def collect_news(data: NewsData):
     except Exception as e:
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# 1. 지수 데이터를 위한 모델
+class IndexData(BaseModel):
+    name: str
+    price: float
+
+@app.post("/collect_index")
+async def collect_index(data: IndexData):
+    try:
+        # DB에 저장할 데이터 준비
+        insert_data = {
+            "name": data.name,
+            "price": data.price
+        }
+
+        # Supabase 테이블에 insert 실행
+        response = supabase.table("market_indices").insert(insert_data).execute()
+        
+        print(f"✅ DB 저장 완료: {data.name} - {data.price}")
+        return {"status": "success", "data": response.data}
+    
+    except Exception as e:
+        print(f"❌ DB 저장 에러: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
