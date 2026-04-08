@@ -1,4 +1,5 @@
 import os
+import openai
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from postgrest import SyncPostgrestClient
@@ -84,3 +85,29 @@ async def collect_index(data: IndexData):
     except Exception as e:
         print(f"❌ DB 저장 에러: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# OpenAI 클라이언트 초기화
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def get_embedding(text: str):
+    safe_text = text[:1000] if text else ""
+    
+    response = client.embeddings.create(
+        input=safe_text,
+        model="text-embedding-3-small"
+    )
+    return response.data[0].embedding
+
+@app.post("/analyze_news")
+async def analyze_news(news_id: int):
+    # 1. DB에서 뉴스 가져오기
+    news = supabase.table("news_data").select("*").eq("id", news_id).single().execute()
+    content = news.data['content']
+    
+    # 2. 임베딩 생성 (AI가 이해하는 숫자로 변환)
+    vector = get_embedding(content)
+    
+    # 3. DB에 업데이트 (embedding 컬럼에 저장)
+    supabase.table("news_data").update({"embedding": vector}).eq("id", news_id).execute()
+    
+    return {"status": "success", "message": "임베딩 완료"}        
