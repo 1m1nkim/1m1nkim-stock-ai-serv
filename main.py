@@ -1,5 +1,6 @@
 import os
 import openai
+import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from postgrest import SyncPostgrestClient
@@ -111,3 +112,128 @@ async def analyze_news(news_id: int):
     supabase.table("news_data").update({"embedding": vector}).eq("id", news_id).execute()
     
     return {"status": "success", "message": "임베딩 완료"}        
+
+# 네이버 뉴스 수집 엔드포인트
+@app.get("/fetch_naver_news")
+def fetch_naver_news(query: str = "증시"):
+    client_id = os.getenv("NAVER_CLIENT_ID")
+    client_secret = os.getenv("NAVER_CLIENT_SECRET")
+    
+    # 날짜순(date)으로 최신 뉴스 10개를 가져옵니다.
+    url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=10&sort=date"
+    headers = {
+        "X-Naver-Client-Id": client_id,
+        "X-Naver-Client-Secret": client_secret
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        news_items = response.json().get("items", [])
+        
+        results = []
+        for item in news_items:
+            # HTML 태그 제거 및 특수문자 정제
+            clean_title = item['title'].replace("<b>", "").replace("</b>", "").replace("&quot;", "'")
+            clean_desc = item['description'].replace("<b>", "").replace("</b>", "").replace("&quot;", "'")
+            
+            # 기존에 만든 collect_news 함수를 재활용해서 DB에 저장합니다.
+            news_data = NewsData(
+                title=clean_title,
+                content=clean_desc,
+                source="Naver",
+                url=item['link']
+            )
+            
+            # DB 저장 시도 (중복이면 알아서 스킵됨)
+            res = collect_news(news_data)
+            results.append(res)
+            
+        return {"status": "success", "count": len(results), "details": results}
+    
+    except Exception as e:
+        print(f"❌ 네이버 뉴스 수집 에러: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/analyze_trend")
+def analyze_trend():
+    # 1. 최근 1시간 내 저장된 뉴스 50개 가져오기
+    # (Supabase 쿼리로 최근 데이터를 긁어옵니다)
+    news_list = supabase.table("news_data").select("title").order("created_at", desc=True).limit(50).execute()
+    titles = [n['title'] for n in news_list.data]
+    
+    # 2. AI에게 테마 분석 시키기
+    prompt = f"다음 뉴스 제목들을 보고 현재 시장의 핵심 테마 3개와 호재/악재 여부를 분석해줘: {', '.join(titles)}"
+    
+    response = client.chat.completions.create(
+        model="gpt-4o", # 또는 gpt-3.5-turbo
+        messages=[{"role": "user", "content": prompt}]
+    )
+    
+    return {"analysis": response.choices[0].message.content}   
+
+@app.get("/market_summary")
+def get_market_summary():
+    # 1. DB에서 최근 뉴스 30개 가져오기
+    news = supabase.table("news_data").select("title, content").order("created_at", desc=True).limit(30).execute()
+    
+    # 2. 뉴스들을 하나의 텍스트로 합치기
+    all_news = "\n".join([f"제목: {n['title']}, 내용: {n['content']}" for n in news.data])
+    
+    # 3. AI에게 브리핑 요청
+    prompt = f"""
+    아래 뉴스들을 분석해서 현재 주식 시장의 주요 테마와 투자자들의 심리를 요약해줘.
+    내용이 짧더라도 핵심 키워드를 중심으로 호재와 악재를 구분해줘.
+    
+    뉴스 데이터:
+    {all_news}
+    """
+    
+    response = client.chat.completions.create(
+        model="gpt-4o", # 또는 gpt-3.5-turbo
+        messages=[{"role": "user", "content": prompt}]
+    )
+    
+    return {"summary": response.choices[0].message.content}
+
+@app.get("/ask_ai")
+def ask_ai(question: str):
+    # 1. 사용자의 질문을 숫자로 변환 (임베딩)
+    query_embedding = get_embedding(question) # 기존에 만든 함수 재활용
+
+    # 2. Supabase에서 질문과 가장 비슷한 뉴스 TOP 5 검색 (벡터 검색)
+    # rpc 호출을 위해 Supabase에 match_news 함수가 미리 생성되어 있어야 합니다.
+    rpc_params = {
+        "query_embedding": query_embedding,
+        "match_threshold": 0.5, # 유사도 50% 이상만
+        "match_count": 5       # 상위 5개
+    }
+    
+    search_result = supabase.rpc("match_news", rpc_params).execute()
+    
+    # 3. 검색된 뉴스들을 하나의 문맥(Context)으로 합치기
+    context = "\n".join([f"[{n['source']}] {n['title']}: {n['content']}" for n in search_result.data])
+    
+    if not context:
+        return {"answer": "죄송합니다. 관련 뉴스를 찾지 못했습니다."}
+
+    # 4. LLM(GPT)에게 뉴스 내용을 바탕으로 대답 요청
+    prompt = f"""
+    당신은 전문 주식 분석가입니다. 아래 제공된 최신 뉴스 데이터를 바탕으로 사용자의 질문에 답변하세요.
+    데이터에 없는 내용은 지어내지 마세요.
+    
+    [최신 뉴스 데이터]:
+    {context}
+    
+    [사용자 질문]:
+    {question}
+    """
+    
+    response = client.chat.completions.create(
+        model="gpt-4o-mini", # 저렴하고 빠른 모델
+        messages=[{"role": "user", "content": prompt}]
+    )
+    
+    return {
+        "answer": response.choices[0].message.content,
+        "sources": [n['url'] for n in search_result.data] # 출처 링크 제공
+    }
