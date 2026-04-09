@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-text-main antialiased m-0 font-sans;
+    background-image: 
+      radial-gradient(at 0% 0%, rgba(30, 58, 138, 0.3) 0px, transparent 50%),
+      radial-gradient(at 100% 100%, rgba(15, 23, 42, 1) 0px, transparent 50%);
+    background-attachment: fixed;
+    height: 100vh;
+    overflow: hidden;
+  }
+}
+
+/* Custom Scrollbar for React components if needed */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+
+/* Markdown styling overrides */
+.prose h3 {
+  @apply text-lg font-bold mt-4 mb-2 border-b border-border-color pb-1 text-white;
+}
+.prose p {
+  @apply mb-3;
+}
+.prose ul {
+  @apply list-disc ml-5 mb-3;
+}
+.prose li {
+  @apply mb-1;
+}

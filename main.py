@@ -11,6 +11,9 @@ import pandas as pd
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from postgrest import SyncPostgrestClient
 from dotenv import load_dotenv
@@ -29,6 +32,14 @@ supabase = SyncPostgrestClient(
 )
 
 app = FastAPI(title="Quant Hybrid RAG Server", version="2.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 stock_text = """
 당신은 사전적 정의를 읊는 봇이 아니라, 테마의 확장성과 돈의 흐름을 읽고 51%의 승률 자리를 찾는 실전 트레이더입니다.
@@ -448,9 +459,83 @@ def ask_ai(question: str):
         return {
             "answer": final_answer,
             "has_past_reference": bool(past_analysis),
-            "sources": [n['url'] for n in search_res.data]
+            "sources": [n['url'] for n in search_res.data],
+            "stock_code": stock_code,
+            "stock_name": stock_name
         }
 
     except Exception as e:
         print(f"❌ 에러 발생: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/chart_data")
+def get_chart_data(code: str, name: str = ""):
+    try:
+        import numpy as np
+        
+        if code.startswith("US:"):
+            ticker = code.replace("US:", "")
+            df = yf.download(ticker, period="6mo", progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+        else:
+            df = fdr.DataReader(code).tail(120)
+
+        if df.empty or len(df) < 20:
+            return {"status": "error", "message": "데이터 부족"}
+
+        df = df.copy()
+        df['ma5'] = df['Close'].rolling(5).mean()
+        df['ma20'] = df['Close'].rolling(20).mean()
+        df['ma60'] = df['Close'].rolling(60).mean()
+
+        delta = df['Close'].diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        df['rsi'] = 100 - 100 / (1 + gain / loss)
+
+        df = df.dropna(subset=['ma20']).tail(60)
+
+        res = []
+        for idx, row in df.iterrows():
+            res.append({
+                "date": str(idx.date()) if hasattr(idx, 'date') else str(idx).split('T')[0],
+                "close": float(row['Close']),
+                "ma5": float(row['ma5']) if not pd.isna(row['ma5']) else None,
+                "ma20": float(row['ma20']) if not pd.isna(row['ma20']) else None,
+                "ma60": float(row['ma60']) if not pd.isna(row['ma60']) else None,
+                "rsi": float(row['rsi']) if not pd.isna(row['rsi']) else None,
+                "volume": float(row['Volume'])
+            })
+
+        latest = res[-1]
+        
+        # NaN safe conversion for latest data
+        vol_ma20 = df['Volume'].rolling(20).mean()
+        recent_vol_ma = vol_ma20.iloc[-1]
+        vol_ratio = float(df['Volume'].iloc[-1] / recent_vol_ma) if not pd.isna(recent_vol_ma) and recent_vol_ma > 0 else 1.0
+
+        def safe_round(val, decimals=1):
+            if val is None or pd.isna(val):
+                return None
+            return round(val, decimals)
+
+        return {
+            "status": "success",
+            "stock_code": code,
+            "stock_name": name,
+            "latest": {
+                "price": latest['close'],
+                "rsi": safe_round(latest['rsi'], 1) if latest['rsi'] else 50,
+                "volume_ratio": safe_round(vol_ratio, 2),
+                "ma5": safe_round(latest['ma5'], 2)
+            },
+            "history": res
+        }
+    except Exception as e:
+        print(f"Chart data error: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.get("/")
+def serve_ui():
+    return FileResponse("index.html")
