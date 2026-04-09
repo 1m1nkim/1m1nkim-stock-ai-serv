@@ -1,395 +1,392 @@
 <!DOCTYPE html>
 <html lang="ko">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Quant Hybrid RAG AI</title>
-    <!-- Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    
-    <!-- React & ReactDOM -->
+    <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    <!-- Babel -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <!-- Recharts dependencies -->
-    <script crossorigin src="https://unpkg.com/react-is@18/umd/react-is.development.js"></script>
-    <script src="https://unpkg.com/prop-types@15.7.2/prop-types.min.js"></script>
-    <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
-    <!-- Marked (for Markdown) -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    
+
     <script>
-        tailwind.config = {
-          theme: {
-            extend: {
-              colors: {
-                background: '#0f172a',
-                panel: 'rgba(30, 41, 59, 0.7)',
-                accent: '#38bdf8',
-                'text-main': '#f8fafc',
-                'text-muted': '#94a3b8',
-                'border-color': 'rgba(255, 255, 255, 0.1)',
-              }
-            }
-          }
-        }
+        tailwind.config = { theme: { extend: { colors: { background: '#131722', panel: '#1e222d', accent: '#2962ff', border: '#2a2e39' } } } }
         marked.setOptions({ breaks: true, gfm: true });
     </script>
     <style>
         body {
             font-family: 'Pretendard', sans-serif;
-             background-color: #0f172a;
-            background-image: 
-                radial-gradient(at 0% 0%, rgba(30, 58, 138, 0.3) 0px, transparent 50%),
-                radial-gradient(at 100% 100%, rgba(15, 23, 42, 1) 0px, transparent 50%);
-            background-attachment: fixed;
-            color: #f8fafc;
-            overflow: hidden; 
+            background-color: #131722;
+            color: #d1d4dc;
+            overflow: hidden;
             margin: 0;
             padding: 0;
         }
 
-        ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background-color: rgba(255, 255, 255, 0.15); border-radius: 4px; }
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
 
-        .markdown-body h3 { font-size: 1.125rem; font-weight: bold; margin-top: 1rem; margin-bottom: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.25rem; color: white; }
-        .markdown-body p { margin-bottom: 0.75rem; }
-        .markdown-body ul { list-style-type: disc; margin-left: 1.25rem; margin-bottom: 0.75rem; }
-        .markdown-body li { margin-bottom: 0.25rem; }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background-color: #2a2e39;
+            border-radius: 3px;
+        }
+
+        .markdown-body h3 {
+            font-size: 1rem;
+            font-weight: bold;
+            margin-top: 1rem;
+            margin-bottom: 0.5rem;
+            border-bottom: 1px solid #2a2e39;
+            padding-bottom: 0.25rem;
+            color: #fff;
+        }
+
+        .markdown-body p {
+            margin-bottom: 0.75rem;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
     </style>
 </head>
+
 <body>
     <div id="root"></div>
 
     <script type="text/babel">
         const { useState, useEffect, useRef, createContext, useContext } = React;
-        const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = window.Recharts;
+        const { createChart, CrosshairMode } = window.LightweightCharts;
 
-        // Custom Context for State Management (Replacing Zustand for straightforward CDN usage)
         const AppContext = createContext();
-        
         function AppProvider({ children }) {
             const [stockCode, setStockCode] = useState(null);
             const [stockName, setStockName] = useState(null);
-
-            const setStockInfo = (code, name) => {
-                setStockCode(code);
-                setStockName(name);
-            };
-
+            const [legendData, setLegendData] = useState(null);
+            const setStockInfo = (code, name) => { setStockCode(code); setStockName(name); };
             return (
-                <AppContext.Provider value={{ stockCode, stockName, setStockInfo }}>
+                <AppContext.Provider value={{ stockCode, stockName, setStockInfo, legendData, setLegendData }}>
                     {children}
                 </AppContext.Provider>
             );
         }
 
-        function ChatPanel() {
-            const { setStockInfo } = useContext(AppContext);
-            const [messages, setMessages] = useState([
-                {
-                    type: 'ai',
-                    text: '안녕하세요. 종목에 대한 실전 분석을 도와드리는 **Quant AI**입니다.\n궁금하신 종목명이나 질문을 편하게 남겨주세요!\n\n예: "한전산업은 어때?", "삼성전자 분석해줘"'
+        // ---------- 완벽 분리형 프로 차트 컴포넌트 ----------
+        function TVChart({ data }) {
+            const chartContainerRef = useRef(null);
+            const { setLegendData } = useContext(AppContext);
+            const [timeRange, setTimeRange] = useState('ALL');
+            const chartRef = useRef(null);
+
+            useEffect(() => {
+                if (!data || !chartContainerRef.current) return;
+                const { history } = data;
+
+                const chart = createChart(chartContainerRef.current, {
+                    layout: {
+                        background: { type: 'solid', color: '#131722' },
+                        textColor: '#8b95a1',
+                        fontSize: 11
+                    },
+                    grid: { vertLines: { color: 'rgba(42, 46, 57, 0.2)' }, horzLines: { color: 'rgba(42, 46, 57, 0.2)' } },
+                    crosshair: { mode: CrosshairMode.Normal },
+                    leftPriceScale: { visible: true, borderColor: '#2a2e39' },
+                    rightPriceScale: { visible: true, borderColor: '#2a2e39' },
+                    timeScale: { borderColor: '#2a2e39', timeVisible: false, rightOffset: 5 },
+                    localization: {
+                        locale: 'ko-KR', dateFormat: 'yyyy-MM-dd',
+                        priceFormatter: price => Math.floor(price).toLocaleString(),
+                    },
+                    autoSize: true,
+                });
+                chartRef.current = chart;
+
+                chart.priceScale('left').applyOptions({ scaleMargins: { top: 0.05, bottom: 0.35 } });
+                chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.05, bottom: 0.35 } });
+
+                const candleData = history.map(item => ({ time: item.time, open: item.open, high: item.high, low: item.low, close: item.close }));
+                const ma5Data = history.map(item => ({ time: item.time, value: item.ma5 })).filter(d => d.value);
+                const ma20Data = history.map(item => ({ time: item.time, value: item.ma20 })).filter(d => d.value);
+                const ma60Data = history.map(item => ({ time: item.time, value: item.ma60 })).filter(d => d.value);
+                const bbUpData = history.map(item => ({ time: item.time, value: item.bb_upper })).filter(d => d.value);
+                const bbLowData = history.map(item => ({ time: item.time, value: item.bb_lower })).filter(d => d.value);
+
+                // 스케일 동기화용 투명 캔들 (오른쪽 축)
+                const syncCandle = chart.addCandlestickSeries({
+                    priceScaleId: 'right',
+                    upColor: 'transparent', downColor: 'transparent', borderVisible: false, wickUpColor: 'transparent', wickDownColor: 'transparent',
+                    lastValueVisible: false, priceLineVisible: false
+                });
+                syncCandle.setData(candleData);
+
+                // 지표용 투명 라인 (왼쪽 축)
+                const invisibleOptions = { priceScaleId: 'left', color: 'transparent', lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false };
+                chart.addLineSeries(invisibleOptions).setData(ma5Data);
+                chart.addLineSeries(invisibleOptions).setData(ma20Data);
+                chart.addLineSeries(invisibleOptions).setData(ma60Data);
+                chart.addLineSeries(invisibleOptions).setData(bbUpData);
+                chart.addLineSeries(invisibleOptions).setData(bbLowData);
+
+                // 진짜 캔들스틱 (왼쪽 축)
+                const candlestickSeries = chart.addCandlestickSeries({
+                    priceScaleId: 'left',
+                    upColor: '#ef5350', downColor: '#2962ff', borderVisible: false,
+                    wickUpColor: '#ef5350', wickDownColor: '#2962ff',
+                });
+                candlestickSeries.setData(candleData);
+
+                const markers = [];
+                history.forEach(item => {
+                    if (item.signal) {
+                        const isWarning = item.signal.includes('저항') || item.signal.includes('상단');
+                        markers.push({
+                            time: item.time, position: isWarning ? 'aboveBar' : 'belowBar',
+                            color: isWarning ? '#ef5350' : '#2962ff', shape: isWarning ? 'arrowDown' : 'arrowUp',
+                        });
+                    }
+                });
+                candlestickSeries.setMarkers(markers);
+
+                // ⭐ 이평선/볼린저밴드 가로선 부활 (priceLineVisible: true)
+                const overlayOptions = { priceScaleId: 'right', lastValueVisible: true, priceLineVisible: true };
+
+                const ma5Series = chart.addLineSeries({ ...overlayOptions, color: '#ec4899', lineWidth: 1.5 });
+                ma5Series.setData(ma5Data);
+                const ma20Series = chart.addLineSeries({ ...overlayOptions, color: '#f59e0b', lineWidth: 1.5 });
+                ma20Series.setData(ma20Data);
+                const ma60Series = chart.addLineSeries({ ...overlayOptions, color: '#a855f7', lineWidth: 1.5 });
+                ma60Series.setData(ma60Data);
+                const bbUpSeries = chart.addLineSeries({ ...overlayOptions, color: '#787b86', lineWidth: 1, lineStyle: 2 });
+                bbUpSeries.setData(bbUpData);
+                const bbLowSeries = chart.addLineSeries({ ...overlayOptions, color: '#787b86', lineWidth: 1, lineStyle: 2 });
+                bbLowSeries.setData(bbLowData);
+
+                // 거래량
+                const volumeSeries = chart.addHistogramSeries({ priceScaleId: 'volume' });
+                chart.priceScale('volume').applyOptions({
+                    position: 'right', visible: true, scaleMargins: { top: 0.7, bottom: 0.15 },
+                });
+                volumeSeries.setData(history.map((item, idx) => {
+                    const prevClose = idx > 0 ? history[idx - 1].close : item.open;
+                    return { time: item.time, value: item.volume, color: item.close >= prevClose ? 'rgba(239, 83, 80, 0.4)' : 'rgba(41, 98, 255, 0.4)' };
+                }));
+
+                // RSI(14)
+                const rsiSeries = chart.addLineSeries({ color: '#06b6d4', lineWidth: 1.5, priceScaleId: 'rsi' });
+                chart.priceScale('rsi').applyOptions({
+                    position: 'right', visible: true, scaleMargins: { top: 0.85, bottom: 0.0 },
+                });
+                rsiSeries.setData(history.map(item => ({ time: item.time, value: item.rsi })).filter(d => d.value));
+                rsiSeries.createPriceLine({ price: 70, color: '#ef5350', lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
+                rsiSeries.createPriceLine({ price: 30, color: '#2962ff', lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
+
+                // 데이터 추출 및 Context 반영
+                const extractLegendData = (item, param) => {
+                    if (!item) return null;
+                    let m5 = item.ma5, m20 = item.ma20, m60 = item.ma60, bUp = item.bb_upper, bLow = item.bb_lower;
+                    if (param && param.seriesData) {
+                        const dM5 = param.seriesData.get(ma5Series); if (dM5) m5 = dM5.value;
+                        const dM20 = param.seriesData.get(ma20Series); if (dM20) m20 = dM20.value;
+                        const dM60 = param.seriesData.get(ma60Series); if (dM60) m60 = dM60.value;
+                        const dUp = param.seriesData.get(bbUpSeries); if (dUp) bUp = dUp.value;
+                        const dLow = param.seriesData.get(bbLowSeries); if (dLow) bLow = dLow.value;
+                    }
+                    return { ...item, ma5: m5, ma20: m20, ma60: m60, bb_upper: bUp, bb_lower: bLow };
+                };
+
+                setLegendData(extractLegendData(history[history.length - 1], null));
+                chart.subscribeCrosshairMove((param) => {
+                    if (param.time && param.seriesData.size > 0) {
+                        const item = history.find(h => h.time === param.time);
+                        setLegendData(extractLegendData(item, param));
+                    } else {
+                        setLegendData(extractLegendData(history[history.length - 1], null));
+                    }
+                });
+
+                return () => chart.remove();
+            }, [data]);
+
+            // 기간 필터 기능
+            useEffect(() => {
+                if (!chartRef.current || !data) return;
+                const { history } = data;
+                let range = history.length;
+                if (timeRange === '1M') range = 20;
+                if (timeRange === '3M') range = 60;
+                if (timeRange === '1Y') range = 250;
+
+                const visibleData = history.slice(Math.max(history.length - range, 0));
+                if (visibleData.length > 0) {
+                    chartRef.current.timeScale().setVisibleRange({
+                        from: visibleData[0].time,
+                        to: visibleData[visibleData.length - 1].time
+                    });
                 }
+            }, [timeRange, data]);
+
+            return (
+                <div className="relative w-full h-full flex flex-col">
+                    <div className="absolute top-2 right-[80px] z-20 flex bg-black/40 rounded p-1 backdrop-blur-sm border border-white/5">
+                        {['1M', '3M', '1Y', 'ALL'].map(range => (
+                            <button
+                                key={range} onClick={() => setTimeRange(range)}
+                                className={`px-3 py-1 text-xs font-bold rounded transition-colors ${timeRange === range ? 'bg-[#2962ff] text-white' : 'text-gray-400 hover:text-white'}`}
+                            >
+                                {range === 'ALL' ? '전체' : range}
+                            </button>
+                        ))}
+                    </div>
+
+                    <div className="flex-1 w-full relative" ref={chartContainerRef}>
+                        <div className="absolute bottom-[17%] left-16 z-10 text-gray-500 text-xs font-bold pointer-events-none">거래량</div>
+                        <div className="absolute bottom-[2%] left-16 z-10 text-[#06b6d4] text-xs font-bold pointer-events-none">RSI (14)</div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ---------- AI 채팅 패널 ----------
+        function ChatPanel() {
+            const { stockCode, setStockInfo } = useContext(AppContext);
+            const [messages, setMessages] = useState([
+                { type: 'ai', text: '어떤 종목을 분석해드릴까요?' }
             ]);
             const [input, setInput] = useState('');
             const [loading, setLoading] = useState(false);
             const messagesEndRef = useRef(null);
 
-            const scrollToBottom = () => {
-                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-            };
-
-            useEffect(() => {
-                scrollToBottom();
-            }, [messages, loading]);
-
             const handleSend = async () => {
                 if (!input.trim() || loading) return;
-
                 const userMsg = input.trim();
                 setMessages(prev => [...prev, { type: 'user', text: userMsg }]);
                 setInput('');
                 setLoading(true);
 
                 try {
-                    const url = `/ask_ai?question=${encodeURIComponent(userMsg)}`;
-                    const res = await fetch(url);
-                    if (!res.ok) throw new Error('서버 응답 오류');
+                    const res = await fetch(`/ask_ai?question=${encodeURIComponent(userMsg)}`);
                     const data = await res.json();
-                    
-                    setMessages(prev => [...prev, {
-                        type: 'ai',
-                        text: data.answer,
-                        sources: data.sources
-                    }]);
-
-                    if (data.stock_code) {
-                        setStockInfo(data.stock_code, data.stock_name);
-                    }
-
+                    setMessages(prev => [...prev, { type: 'ai', text: data.answer }]);
+                    if (data.stock_code) setStockInfo(data.stock_code, data.stock_name);
                 } catch (err) {
-                    setMessages(prev => [...prev, { type: 'ai', text: `오류가 발생했습니다: ${err.message}` }]);
+                    setMessages(prev => [...prev, { type: 'ai', text: `오류: ${err.message}` }]);
                 } finally {
                     setLoading(false);
                 }
             };
 
-            const renderMarkdown = (text) => {
-                return { __html: marked.parse(text) };
-            };
+            useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, loading]);
 
             return (
-                <div className="flex flex-col h-full bg-panel backdrop-blur-md rounded-2xl border border-border-color shadow-2xl p-6 relative z-10 transition-all duration-300">
-                    <div className="mb-6 flex-shrink-0">
-                        <h1 className="text-2xl font-bold bg-gradient-to-r from-accent to-indigo-400 bg-clip-text text-transparent">
-                            Quant AI Analyst
-                        </h1>
-                        <p className="text-sm text-text-muted mt-1">실전 트레이딩 관점의 종목 분석을 제공합니다</p>
+                <div className="flex flex-col h-full bg-[#1e222d] border-l border-[#2a2e39] text-sm">
+                    <div className="p-4 border-b border-[#2a2e39] flex items-center justify-between bg-[#131722]/50">
+                        <h2 className="font-bold text-white flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full bg-[#2962ff]"></span> AI 리포트
+                        </h2>
                     </div>
-
-                    <div className="flex-1 overflow-y-auto pr-2 space-y-6">
+                    <div className="flex-1 overflow-y-auto p-5 space-y-5">
                         {messages.map((msg, i) => (
-                            <div key={i} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                <div className={`max-w-[85%] rounded-2xl p-4 shadow-sm ${msg.type === 'user' ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white rounded-br-sm' : 'bg-slate-700/50 border border-border-color rounded-bl-sm'}`}>
-                                    <div 
-                                        className="markdown-body text-[0.95rem] leading-relaxed break-words"
-                                        dangerouslySetInnerHTML={renderMarkdown(msg.text)}
-                                    />
-                                    {msg.sources && msg.sources.length > 0 && (
-                                        <div className="mt-4 pt-3 border-t border-border-color/50 text-xs text-text-muted">
-                                            <span className="block font-semibold mb-2">참고 문서</span>
-                                            <div className="flex flex-wrap gap-2">
-                                                {[...new Set(msg.sources)].map((src, idx) => {
-                                                    let domain = "기사 링크";
-                                                    try { domain = new URL(src).hostname.replace('www.', ''); } catch (e) {}
-                                                    return (
-                                                        <a key={idx} href={src} target="_blank" rel="noreferrer" className="inline-block px-2 py-1 bg-accent/10 text-accent rounded-lg hover:bg-accent/20 transition-colors">
-                                                            📄 {domain}
-                                                        </a>
-                                                    );
-                                                })}
-                                            </div>
-                                        </div>
-                                    )}
+                            <div key={i} className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}>
+                                <div className={`max-w-[90%] rounded-xl px-5 py-4 ${msg.type === 'user' ? 'bg-[#2962ff] text-white rounded-br-sm' : 'bg-[#2a2e39] text-gray-200 rounded-tl-sm shadow-lg'}`}>
+                                    <div className="markdown-body" dangerouslySetInnerHTML={{ __html: marked.parse(msg.text) }} />
                                 </div>
                             </div>
                         ))}
-                        
-                        {loading && (
-                            <div className="flex justify-start">
-                                <div className="bg-slate-700/50 border border-border-color rounded-2xl rounded-bl-sm p-5 space-y-3 w-2/3 max-w-xs animate-pulse">
-                                    <div className="h-3 bg-slate-600/50 rounded w-3/4"></div>
-                                    <div className="h-3 bg-slate-600/50 rounded w-full"></div>
-                                    <div className="h-3 bg-slate-600/50 rounded w-5/6"></div>
-                                </div>
-                            </div>
-                        )}
+                        {loading && <div className="bg-[#2a2e39] rounded-xl px-5 py-4 text-gray-400 animate-pulse rounded-tl-sm w-fit">분석 중...</div>}
                         <div ref={messagesEndRef} />
                     </div>
-
-                    <div className="mt-4 flex-shrink-0 flex gap-3 pt-2">
-                        <input 
-                            type="text" 
-                            value={input}
-                            onChange={e => setInput(e.target.value)}
-                            onKeyDown={e => e.key === 'Enter' && handleSend()}
-                            placeholder="종목명이나 질문을 입력해주세요..."
-                            className="flex-1 bg-slate-800/60 border border-border-color rounded-xl px-4 py-3 text-white placeholder-text-muted outline-none focus:border-accent focus:ring-1 focus:ring-accent transition-all"
+                    <div className="p-4 bg-[#131722]/50 border-t border-[#2a2e39]">
+                        <input
+                            type="text" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSend()}
+                            placeholder="종목을 입력하세요..."
+                            className="w-full bg-[#2a2e39] text-white rounded-lg px-4 py-3 outline-none focus:ring-1 focus:ring-[#2962ff]"
                         />
-                        <button 
-                            onClick={handleSend}
-                            disabled={loading || !input.trim()}
-                            className="bg-gradient-to-r from-blue-500 to-blue-600 text-white font-semibold px-8 rounded-xl hover:from-blue-400 hover:to-blue-500 disabled:opacity-50 transition-all shadow-lg"
-                        >
-                            전송
-                        </button>
                     </div>
                 </div>
             );
         }
 
-        function DashboardPanel() {
-            const { stockCode, stockName } = useContext(AppContext);
-            const [data, setData] = useState(null);
-            const [loading, setLoading] = useState(false);
-            
-            // Toggles
-            const [showMA5, setShowMA5] = useState(true);
-            const [showMA20, setShowMA20] = useState(true);
-            const [showMA60, setShowMA60] = useState(false);
+        // ---------- 메인 레이아웃 ----------
+        function App() {
+            const { stockCode, stockName, legendData } = useContext(AppContext);
+            const [chartData, setChartData] = useState(null);
 
             useEffect(() => {
                 if (!stockCode) return;
-                
-                let isMounted = true;
-                const fetchChart = async () => {
-                    setLoading(true);
-                    try {
-                        const url = `/api/chart_data?code=${encodeURIComponent(stockCode)}&name=${encodeURIComponent(stockName || '')}`;
-                        const res = await fetch(url);
-                        if (!res.ok) throw new Error('API Error');
-                        const json = await res.json();
-                        
-                        if (json.status === 'success' && isMounted) {
-                            setData(json);
-                        }
-                    } catch (err) {
-                        console.error(err);
-                    } finally {
-                        if (isMounted) setLoading(false);
-                    }
-                };
-                fetchChart();
-                
-                return () => { isMounted = false; };
-            }, [stockCode, stockName]);
+                fetch(`/api/chart_data?code=${encodeURIComponent(stockCode)}&name=${encodeURIComponent(stockName || '')}`)
+                    .then(r => r.json())
+                    .then(data => { if (data.status === 'success') setChartData(data); });
+            }, [stockCode]);
 
-            if (!stockCode) {
-                return (
-                    <div className="h-full w-full flex items-center justify-center text-text-muted border-2 border-dashed border-border-color rounded-2xl bg-panel/30">
-                        왼쪽에서 종목에 대해 질문하면 이곳에 대시보드가 활성화됩니다.
-                    </div>
-                );
-            }
+            return (
+                <div className="flex w-full h-[100vh] bg-[#131722] overflow-hidden text-sm">
+                    {/* 차트 영역 */}
+                    <div className="flex-1 flex flex-col h-full relative border-r border-[#1e222d] min-w-0">
 
-            if (loading || !data) {
-                return (
-                    <div className="h-full bg-panel backdrop-blur-md border border-border-color rounded-2xl p-6 flex flex-col gap-6 animate-pulse">
-                        <div className="flex justify-between items-center">
-                            <div className="h-8 bg-slate-700/50 rounded w-1/3"></div>
-                            <div className="flex gap-4">
-                                <div className="h-6 bg-slate-700/50 rounded w-16"></div>
-                                <div className="h-6 bg-slate-700/50 rounded w-16"></div>
+                        {/* 상단 데이터 헤더 */}
+                        <div className="w-full border-b border-[#1e222d] bg-[#131722]/95 z-40 px-5 py-3 shrink-0 flex flex-col justify-center">
+                            <div className="flex items-center gap-3">
+                                <span className="font-bold text-white text-xl tracking-tight">
+                                    {stockName || "종목을 검색해주세요"}
+                                    {stockCode && <span className="text-gray-500 text-sm ml-2 font-normal">{stockCode}</span>}
+                                </span>
+                                {legendData?.signal && (
+                                    <span className={`px-2 py-0.5 text-[0.7rem] font-bold rounded text-white ${legendData.signal.includes('저항') || legendData.signal.includes('상단') ? 'bg-[#ef5350]' : 'bg-[#2962ff]'}`}>
+                                        {legendData.signal.includes('저항') || legendData.signal.includes('상단') ? '🚨 매도주의 (단기고점)' : '💡 매수타점 (눌림목)'}
+                                    </span>
+                                )}
                             </div>
-                        </div>
-                        <div className="flex-1 bg-slate-700/20 rounded-xl"></div>
-                        <div className="h-32 bg-slate-700/30 rounded-xl"></div>
-                    </div>
-                );
-            }
 
-            const { history, latest } = data;
-
-            const CustomTooltip = ({ active, payload, label }) => {
-                if (active && payload && payload.length) {
-                    return (
-                        <div className="bg-slate-800 border border-slate-600 p-3 rounded shadow-lg text-sm z-50">
-                            <p className="text-slate-300 mb-2 font-bold">{label}</p>
-                            {payload.map((entry, idx) => (
-                                <div key={idx} className="flex gap-4 justify-between" style={{ color: entry.color }}>
-                                    <span>{entry.name}:</span>
-                                    <span className="font-mono">{Number(entry.value).toLocaleString()}</span>
+                            {legendData ? (
+                                <div className="flex flex-wrap items-center gap-x-5 gap-y-1 mt-2 text-[0.8rem] font-mono">
+                                    <div className="flex gap-3">
+                                        <span className="text-gray-400">시가 <span className="text-white ml-0.5">{Math.floor(legendData.open).toLocaleString()}</span></span>
+                                        <span className="text-gray-400">고가 <span className="text-[#ef5350] ml-0.5">{Math.floor(legendData.high).toLocaleString()}</span></span>
+                                        <span className="text-gray-400">저가 <span className="text-[#2962ff] ml-0.5">{Math.floor(legendData.low).toLocaleString()}</span></span>
+                                        <span className="text-gray-400">종가 <span className="text-white ml-0.5 font-bold text-[0.9rem]">{Math.floor(legendData.close).toLocaleString()}</span></span>
+                                    </div>
+                                    <div className="w-[1px] h-3 bg-[#2a2e39]"></div>
+                                    <div className="flex gap-3 font-bold">
+                                        {legendData.ma5 && <span className="text-[#ec4899]">MA5: {Math.floor(legendData.ma5).toLocaleString()}</span>}
+                                        {legendData.ma20 && <span className="text-[#f59e0b]">MA20: {Math.floor(legendData.ma20).toLocaleString()}</span>}
+                                        {legendData.ma60 && <span className="text-[#a855f7]">MA60: {Math.floor(legendData.ma60).toLocaleString()}</span>}
+                                    </div>
+                                    <div className="w-[1px] h-3 bg-[#2a2e39]"></div>
+                                    <div className="flex gap-3 font-bold">
+                                        <span className="text-gray-400">Vol: {Math.floor(legendData.volume).toLocaleString()}</span>
+                                        <span className="text-[#06b6d4]">RSI: {legendData.rsi ? legendData.rsi.toFixed(1) : 0}</span>
+                                    </div>
+                                    <div className="flex gap-3 font-bold">
+                                        <span className="text-gray-500 ml-2">({legendData.time})</span>
+                                    </div>
                                 </div>
-                            ))}
+                            ) : (
+                                <div className="h-6 mt-2"></div>
+                            )}
                         </div>
-                    );
-                }
-                return null;
-            };
 
-            return (
-                <div className="h-full bg-panel backdrop-blur-md rounded-2xl border border-border-color p-6 shadow-2xl flex flex-col">
-                    <div className="flex justify-between items-end mb-6">
-                        <div>
-                            <h2 className="text-2xl font-bold tracking-tight text-white mb-1">{stockName || stockCode} 기업 분석</h2>
-                            <p className="text-sm text-text-muted">종목명 기반 실시간 분석 대시보드</p>
-                        </div>
-                        <div className="flex gap-6 text-right">
-                            <div>
-                                <p className="text-xs text-text-muted mb-1 font-semibold">현재가</p>
-                                <p className="text-lg text-white font-mono">{latest?.price?.toLocaleString() || '-'}</p>
-                            </div>
-                            <div>
-                                <p className="text-xs text-text-muted mb-1 font-semibold">RSI (14)</p>
-                                <p className={`text-lg font-mono ${latest?.rsi < 35 ? 'text-green-400' : latest?.rsi > 70 ? 'text-red-400' : 'text-white'}`}>
-                                    {latest?.rsi || '-'}
-                                </p>
-                            </div>
-                            <div>
-                                <p className="text-xs text-text-muted mb-1 font-semibold">거래량비</p>
-                                <p className="text-lg text-white font-mono">{latest?.volume_ratio || '-'}x</p>
-                            </div>
+                        <div className="flex-1 w-full relative pt-2 pb-2 px-2">
+                            {chartData ? <TVChart data={chartData} /> : <div className="w-full h-full flex items-center justify-center text-gray-500">종목을 검색해주세요</div>}
                         </div>
                     </div>
 
-                    <div className="flex-1 bg-slate-900/50 rounded-xl p-4 border border-border-color/50 mb-6 relative w-full h-[60%]">
-                        <ResponsiveContainer width="100%" height="100%">
-                            <LineChart data={history} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-                                <XAxis dataKey="date" stroke="#94a3b8" fontSize={11} tickMargin={8} minTickGap={30} />
-                                <YAxis domain={['auto', 'auto']} stroke="#94a3b8" fontSize={11} width={60} tickFormatter={(v) => v.toLocaleString()} />
-                                <Tooltip content={<CustomTooltip />} />
-                                <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
-                                
-                                <Line type="monotone" name="종가" dataKey="close" stroke="#38bdf8" strokeWidth={2} dot={false} isAnimationActive={false} />
-                                {showMA5 && <Line type="monotone" name="MA5" dataKey="ma5" stroke="#f472b6" strokeWidth={1.5} dot={false} isAnimationActive={false} />}
-                                {showMA20 && <Line type="monotone" name="MA20" dataKey="ma20" stroke="#fbbf24" strokeWidth={1.5} strokeDasharray="5 5" dot={false} isAnimationActive={false} />}
-                                {showMA60 && <Line type="monotone" name="MA60" dataKey="ma60" stroke="#a78bfa" strokeWidth={1.5} dot={false} isAnimationActive={false} />}
-                            </LineChart>
-                        </ResponsiveContainer>
-                    </div>
-
-                    <div className="flex-shrink-0 grid grid-cols-2 gap-4">
-                        {/* Toggle Switches */}
-                        <div className="bg-slate-800/40 rounded-xl p-4 border border-border-color flex flex-col gap-3 justify-center">
-                            <label className="flex items-center justify-between cursor-pointer group">
-                                <span className="text-sm font-medium text-slate-300">5일 이동평균선</span>
-                                <input type="checkbox" className="sr-only peer" checked={showMA5} onChange={() => setShowMA5(!showMA5)} />
-                                <div className="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-pink-400 relative"></div>
-                            </label>
-                            <label className="flex items-center justify-between cursor-pointer group">
-                                <span className="text-sm font-medium text-slate-300">20일 이동평균선</span>
-                                <input type="checkbox" className="sr-only peer" checked={showMA20} onChange={() => setShowMA20(!showMA20)} />
-                                <div className="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-400 relative"></div>
-                            </label>
-                            <label className="flex items-center justify-between cursor-pointer group">
-                                <span className="text-sm font-medium text-slate-300">60일 이동평균선</span>
-                                <input type="checkbox" className="sr-only peer" checked={showMA60} onChange={() => setShowMA60(!showMA60)} />
-                                <div className="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-400 relative"></div>
-                            </label>
-                        </div>
-                        
-                        {/* Summary Card */}
-                        <div className="bg-slate-800/40 rounded-xl p-4 border border-border-color">
-                            <h3 className="text-sm font-bold text-white mb-2 pb-1 border-b border-slate-700">추세 시그널</h3>
-                            <ul className="text-sm space-y-2 text-slate-300">
-                                <li className="flex justify-between"><span>단기 방향 (5일선):</span> <span className={latest?.price > latest?.ma5 ? 'text-red-400 font-bold' : 'text-blue-400 font-bold'}>{latest?.price > latest?.ma5 ? '상승' : '하락'}</span></li>
-                                <li className="flex justify-between"><span>중기 추세 (20일선):</span> <span className={latest?.price > latest?.ma20 ? 'text-red-400 font-bold' : 'text-blue-400 font-bold'}>{latest?.price > latest?.ma20 ? '정배열 진입' : '조정/역배열'}</span></li>
-                                <li className="flex justify-between"><span>시장 심리 (RSI):</span> <span className="font-mono text-white">{latest?.rsi > 70 ? '단기 과열' : latest?.rsi < 30 ? '반등 기회' : '중립 수준'}</span></li>
-                                <li className="flex justify-between"><span>수급 (거래량비):</span> <span className="font-mono text-white">{latest?.volume_ratio > 1.5 ? '수급 몰림' : latest?.volume_ratio < 0.5 ? '관심 저조' : '평범'}</span></li>
-                            </ul>
-                        </div>
-                    </div>
-                </div>
-            );
-        }
-
-        function App() {
-            return (
-                <div className="flex h-[100vh] w-full p-4 lg:p-6 gap-6 mx-auto overflow-hidden">
-                    <div className="w-full lg:w-[450px] xl:w-[500px] flex-shrink-0 h-full">
-                        <ChatPanel />
-                    </div>
-                    <div className="hidden lg:block flex-1 min-w-0 h-full">
-                        <DashboardPanel />
-                    </div>
+                    <div className="w-[450px] shrink-0 h-full"><ChatPanel /></div>
                 </div>
             );
         }
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(
-            <AppProvider>
-                <App />
-            </AppProvider>
-        );
+        root.render(<AppProvider><App /></AppProvider>);
     </script>
 </body>
+
 </html>

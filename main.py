@@ -234,7 +234,7 @@ def get_technical_analysis(name: str, code: str) -> str:
                 df.columns = df.columns.droplevel(1)
             unit = "달러"
         else:
-            df = fdr.DataReader(code).tail(120)
+            df = fdr.DataReader(code).tail(500)
             unit = "원"
 
         if df.empty or len(df) < 60:
@@ -489,23 +489,51 @@ def get_chart_data(code: str, name: str = ""):
         df['ma20'] = df['Close'].rolling(20).mean()
         df['ma60'] = df['Close'].rolling(60).mean()
 
+        bb_std = df['Close'].rolling(20).std()
+        df['bb_upper'] = df['ma20'] + 2 * bb_std
+        df['bb_lower'] = df['ma20'] - 2 * bb_std
+
         delta = df['Close'].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = (-delta.clip(upper=0)).rolling(14).mean()
         df['rsi'] = 100 - 100 / (1 + gain / loss)
 
-        df = df.dropna(subset=['ma20']).tail(60)
+        df = df.dropna(subset=['ma20']).tail(400)
 
         res = []
         for idx, row in df.iterrows():
+            signal = None
+            price = float(row['Close'])
+            # 1. 밴드 상단/하단
+            if not pd.isna(row['bb_lower']) and price <= float(row['bb_lower']) * 1.01:
+                signal = 'BB하단 지지(눌림)'
+            elif not pd.isna(row['bb_upper']) and price >= float(row['bb_upper']) * 0.99:
+                signal = 'BB상단 저항'
+            # 2. 60일선 (장기)
+            elif not pd.isna(row['ma60']) and price <= float(row['ma60']) * 1.015 and price >= float(row['ma60']) * 0.985:
+                # 돌파인지 눌림인지
+                if row['ma5'] > row['ma60']:
+                    signal = '60일선 안착'
+                else:
+                    signal = '60일선 지지/저항'
+            # 3. 20일선 (단기)
+            elif not pd.isna(row['ma20']) and price <= float(row['ma20']) * 1.01 and price >= float(row['ma20']) * 0.99:
+                signal = '20일선 눌림'
+            
             res.append({
-                "date": str(idx.date()) if hasattr(idx, 'date') else str(idx).split('T')[0],
-                "close": float(row['Close']),
+                "time": str(idx.date()) if hasattr(idx, 'date') else str(idx).split('T')[0],
+                "open": float(row['Open']) if 'Open' in row else price,
+                "high": float(row['High']) if 'High' in row else price,
+                "low": float(row['Low']) if 'Low' in row else price,
+                "close": price,
                 "ma5": float(row['ma5']) if not pd.isna(row['ma5']) else None,
                 "ma20": float(row['ma20']) if not pd.isna(row['ma20']) else None,
                 "ma60": float(row['ma60']) if not pd.isna(row['ma60']) else None,
+                "bb_upper": float(row['bb_upper']) if not pd.isna(row['bb_upper']) else None,
+                "bb_lower": float(row['bb_lower']) if not pd.isna(row['bb_lower']) else None,
                 "rsi": float(row['rsi']) if not pd.isna(row['rsi']) else None,
-                "volume": float(row['Volume'])
+                "volume": float(row['Volume']),
+                "signal": signal
             })
 
         latest = res[-1]
