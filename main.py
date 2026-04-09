@@ -1,10 +1,13 @@
 import os
 import openai
 import requests
+import time
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from postgrest import SyncPostgrestClient
 from dotenv import load_dotenv
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 # 1. 환경 변수 불러오기
 load_dotenv()
@@ -30,6 +33,18 @@ class NewsData(BaseModel):
     source: str
     url: str
 
+# OpenAI 클라이언트 초기화
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def get_embedding(text: str):
+    safe_text = text[:1000] if text else ""
+    
+    response = client.embeddings.create(
+        input=safe_text,
+        model="text-embedding-3-small"
+    )
+    return response.data[0].embedding
+
 @app.get("/")
 def read_root():
     return {"message": "AI 기반 증시 데이터 서버가 정상 작동 중입니다 🚀"}
@@ -47,21 +62,26 @@ def collect_news(data: NewsData):
         if len(data.content) < 20:
             return {"status": "skipped", "message": "내용이 너무 짧아 필터링되었습니다."}
 
-        # [3단계] DB 저장
+        # [3단계] AI 임베딩 생성 (제목 + 내용을 합쳐서 문맥을 풍부하게 만듭니다)
+        text_to_embed = f"제목: {data.title}\n내용: {data.content}"
+        vector = get_embedding(text_to_embed)
+
+        # [4단계] DB 저장 (embedding 데이터 포함!)
         insert_data = {
             "title": data.title,
             "content": data.content,
             "source": data.source,
-            "url": data.url
+            "url": data.url,
+            "embedding": vector  # 드디어 DB에 벡터 숫자가 들어갑니다!
         }
         
         response = supabase.table("news_data").insert(insert_data).execute()
         
-        return {"status": "success", "message": "데이터가 성공적으로 저장되었습니다.", "data": response.data}
+        return {"status": "success", "message": "데이터 및 임베딩 저장 완료!", "data": response.data}
 
     except Exception as e:
-        print(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"❌ 에러 발생: {str(e)}")
+        return {"status": "error", "message": str(e)}
 
 # 1. 지수 데이터를 위한 모델
 class IndexData(BaseModel):
@@ -87,39 +107,12 @@ async def collect_index(data: IndexData):
         print(f"❌ DB 저장 에러: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# OpenAI 클라이언트 초기화
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-def get_embedding(text: str):
-    safe_text = text[:1000] if text else ""
-    
-    response = client.embeddings.create(
-        input=safe_text,
-        model="text-embedding-3-small"
-    )
-    return response.data[0].embedding
-
-@app.post("/analyze_news")
-async def analyze_news(news_id: int):
-    # 1. DB에서 뉴스 가져오기
-    news = supabase.table("news_data").select("*").eq("id", news_id).single().execute()
-    content = news.data['content']
-    
-    # 2. 임베딩 생성 (AI가 이해하는 숫자로 변환)
-    vector = get_embedding(content)
-    
-    # 3. DB에 업데이트 (embedding 컬럼에 저장)
-    supabase.table("news_data").update({"embedding": vector}).eq("id", news_id).execute()
-    
-    return {"status": "success", "message": "임베딩 완료"}        
-
 # 네이버 뉴스 수집 엔드포인트
 @app.get("/fetch_naver_news")
 def fetch_naver_news(query: str = "증시"):
     client_id = os.getenv("NAVER_CLIENT_ID")
     client_secret = os.getenv("NAVER_CLIENT_SECRET")
     
-    # 날짜순(date)으로 최신 뉴스 10개를 가져옵니다.
     url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=10&sort=date"
     headers = {
         "X-Naver-Client-Id": client_id,
@@ -132,11 +125,9 @@ def fetch_naver_news(query: str = "증시"):
         
         results = []
         for item in news_items:
-            # HTML 태그 제거 및 특수문자 정제
             clean_title = item['title'].replace("<b>", "").replace("</b>", "").replace("&quot;", "'")
             clean_desc = item['description'].replace("<b>", "").replace("</b>", "").replace("&quot;", "'")
             
-            # 기존에 만든 collect_news 함수를 재활용해서 DB에 저장합니다.
             news_data = NewsData(
                 title=clean_title,
                 content=clean_desc,
@@ -144,9 +135,10 @@ def fetch_naver_news(query: str = "증시"):
                 url=item['link']
             )
             
-            # DB 저장 시도 (중복이면 알아서 스킵됨)
             res = collect_news(news_data)
             results.append(res)
+            
+            time.sleep(0.5) 
             
         return {"status": "success", "count": len(results), "details": results}
     
@@ -204,7 +196,7 @@ def ask_ai(question: str):
     # rpc 호출을 위해 Supabase에 match_news 함수가 미리 생성되어 있어야 합니다.
     rpc_params = {
         "query_embedding": query_embedding,
-        "match_threshold": 0.5, # 유사도 50% 이상만
+        "match_threshold": 0.3, # 유사도 50% 이상만
         "match_count": 5       # 상위 5개
     }
     
