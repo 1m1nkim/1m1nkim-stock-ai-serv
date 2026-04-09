@@ -66,6 +66,7 @@ stock_text = """
 3) 수급/거래량: 거래량이 들어왔고, 누가 사고 있는가?
 4) 차트 자리: 현재 위치가 고점/눌림목/바닥 중 어디인가?
 5) 결론 도출: 51%의 승률이 나오는 자리인가? 애매하면 '관망/대기', 승산이 있으면 '분할 진입'을 명확히 제시하라.
+6) 매매 타점 (필수 출력): 차트 지표로 전달받은 '매수/매도 신호', '목표가', '손절가'를 반드시 그대로 브리핑해라. 만약 '매수 타점 아님'이라면 왜 타점이 아닌지 다시 한번 뼈 때리게 조언해라.
 
 [5. 일정/수급 선취매 관점]
 - 지수 편입 선취매: 코스닥150 등 편입 예상 종목은 발표 3~4개월 전부터 패시브 수급이 선반영된다. 바닥권 선취매 후 대기가 핵심이다.
@@ -215,7 +216,6 @@ def find_stock(question: str):
 
 def get_technical_analysis(name: str, code: str) -> str:
     try:
-        # 미국/한국 종목 분기
         if code.startswith("US:"):
             ticker = code.replace("US:", "")
             df = yf.download(ticker, period="6mo", progress=False)
@@ -229,28 +229,93 @@ def get_technical_analysis(name: str, code: str) -> str:
         if df.empty or len(df) < 60:
             return f"[{name} 데이터 부족]"
 
-        close = df['Close']
+        close  = df['Close']
+        volume = df['Volume']
+        high   = df['High']
+        low    = df['Low']
+
         price = round(float(close.iloc[-1]), 2)
         ma5   = round(float(close.rolling(5).mean().iloc[-1]), 2)
         ma20  = round(float(close.rolling(20).mean().iloc[-1]), 2)
         ma60  = round(float(close.rolling(60).mean().iloc[-1]), 2)
 
-        delta  = close.diff()
-        gain   = delta.clip(lower=0).rolling(14).mean()
-        loss   = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi    = float((100 - 100 / (1 + gain / loss)).iloc[-1])
+        # RSI
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rsi   = float((100 - 100 / (1 + gain / loss)).iloc[-1])
 
+        # MACD
         ema12  = close.ewm(span=12).mean()
         ema26  = close.ewm(span=26).mean()
         macd   = ema12 - ema26
         signal = macd.ewm(span=9).mean()
+        macd_val   = float(macd.iloc[-1])
+        signal_val = float(signal.iloc[-1])
+
+        # 볼린저밴드
+        bb_mid   = close.rolling(20).mean()
+        bb_std   = close.rolling(20).std()
+        bb_upper = round(float((bb_mid + 2 * bb_std).iloc[-1]), 2)
+        bb_lower = round(float((bb_mid - 2 * bb_std).iloc[-1]), 2)
+        bb_width = round(float(((bb_upper - bb_lower) / float(bb_mid.iloc[-1])) * 100), 2)
+
+        # 거래량 분석
+        vol_ma20     = volume.rolling(20).mean()
+        vol_ratio    = round(float(volume.iloc[-1] / vol_ma20.iloc[-1]), 2)  # 평균 대비 배수
+        vol_trend    = "증가" if volume.iloc[-1] > vol_ma20.iloc[-1] else "감소"
+
+        # 지지/저항 (20일 고점/저점)
+        resist = round(float(high.rolling(20).max().iloc[-1]), 2)
+        support = round(float(low.rolling(20).min().iloc[-1]), 2)
+
+        # 타점 판단
+        entry_signal = []
+        target_price = None
+        stop_loss    = None
+
+        # 매수 타점 조건
+        if rsi <= 35 and macd_val > signal_val:
+            entry_signal.append("RSI 과매도 + MACD 반등")
+        if price <= ma20 * 1.02 and price >= ma20 * 0.98:
+            entry_signal.append("20일선 눌림목")
+        if vol_ratio >= 1.5 and macd_val > signal_val:
+            entry_signal.append("거래량 급증 + MACD 매수")
+        if price <= bb_lower * 1.02:
+            entry_signal.append("볼린저밴드 하단 반등 구간")
+
+        # 매도 타점 조건
+        sell_signal = []
+        if rsi >= 70:
+            sell_signal.append("RSI 과매수 구간")
+        if price >= bb_upper * 0.98:
+            sell_signal.append("볼린저밴드 상단 근접")
+        if price >= resist * 0.98:
+            sell_signal.append("20일 저항선 근접")
+
+        # 목표가 / 손절가 계산
+        if entry_signal:
+            target_price = round(price * 1.08, 2)   # 8% 목표
+            stop_loss    = round(price * 0.95, 2)    # 5% 손절
+
+        # 🔥 에러 해결 부분: None 방어 로직 추가
+        target_str = f"{target_price:,}{unit}" if target_price is not None else "매수 타점 아님"
+        stop_str   = f"{stop_loss:,}{unit}" if stop_loss is not None else "매수 타점 아님"
 
         return (
             f"[{name} 기술적 지표]\n"
             f"- 현재가: {price:,}{unit}\n"
-            f"- 이동평균: 5일({ma5:,}), 20일({ma20:,}), 60일({ma60:,})\n"
+            f"- 이동평균: 5일({ma5:,}) / 20일({ma20:,}) / 60일({ma60:,})\n"
             f"- RSI: {rsi:.1f} ({'과매수' if rsi>=70 else '과매도' if rsi<=30 else '중립'})\n"
-            f"- MACD: {'매수신호' if macd.iloc[-1] > signal.iloc[-1] else '매도신호'}\n"
+            f"- MACD: {'매수신호' if macd_val > signal_val else '매도신호'}\n"
+            f"- 볼린저밴드: 상단({bb_upper:,}) / 하단({bb_lower:,}) / 밴드폭({bb_width}%)\n"
+            f"- 거래량: 평균 대비 {vol_ratio}배 ({vol_trend})\n"
+            f"- 지지선: {support:,}{unit} / 저항선: {resist:,}{unit}\n"
+            f"\n[타점 분석]\n"
+            f"- 매수 신호: {', '.join(entry_signal) if entry_signal else '현재 없음'}\n"
+            f"- 매도 신호: {', '.join(sell_signal) if sell_signal else '현재 없음'}\n"
+            f"- 목표가: {target_str}\n"
+            f"- 손절가: {stop_str}\n"
         )
 
     except Exception as e:
