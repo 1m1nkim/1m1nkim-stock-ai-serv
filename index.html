@@ -7,14 +7,12 @@
     <title>Quant Hybrid RAG AI</title>
     <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap"
         rel="stylesheet">
-
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-
     <script>
         tailwind.config = { theme: { extend: { colors: { background: '#131722', panel: '#1e222d', accent: '#2962ff', border: '#2a2e39' } } } }
         marked.setOptions({ breaks: true, gfm: true });
@@ -43,19 +41,62 @@
         }
 
         .markdown-body h3 {
-            font-size: 1rem;
-            font-weight: bold;
-            margin-top: 1rem;
-            margin-bottom: 0.5rem;
+            font-size: 1.05rem;
+            font-weight: 700;
+            margin-top: 1.5rem;
+            margin-bottom: 0.6rem;
             border-bottom: 1px solid #2a2e39;
-            padding-bottom: 0.25rem;
+            padding-bottom: 0.3rem;
             color: #fff;
         }
 
+        .markdown-body h3:first-child {
+            margin-top: 0;
+        }
+
+        .markdown-body ul {
+            padding-left: 0;
+            margin-bottom: 1rem;
+            list-style: none;
+        }
+
+        .markdown-body li {
+            margin-bottom: 0.6rem;
+            position: relative;
+            padding-left: 1.2rem;
+            line-height: 1.6;
+            color: #d1d4dc;
+        }
+
+        .markdown-body li::before {
+            content: '•';
+            color: #2962ff;
+            position: absolute;
+            left: 0;
+            font-weight: bold;
+        }
+
+        .markdown-body strong {
+            color: #60a5fa;
+            font-weight: 600;
+            margin-right: 0.3rem;
+        }
+
         .markdown-body p {
-            margin-bottom: 0.75rem;
-            font-size: 0.9rem;
-            line-height: 1.5;
+            margin-bottom: 0.8rem;
+            line-height: 1.6;
+        }
+
+        .streaming-cursor::after {
+            content: ' ▌';
+            animation: blink 1s step-start infinite;
+            color: #2962ff;
+        }
+
+        @keyframes blink {
+            50% {
+                opacity: 0;
+            }
         }
     </style>
 </head>
@@ -72,194 +113,232 @@
             const [stockCode, setStockCode] = useState(null);
             const [stockName, setStockName] = useState(null);
             const [legendData, setLegendData] = useState(null);
+            const [latestData, setLatestData] = useState(null);
+            const [isAnalyzing, setIsAnalyzing] = useState(false);
+            const [timeRange, setTimeRange] = useState('ALL');
+
             const setStockInfo = (code, name) => { setStockCode(code); setStockName(name); };
             return (
-                <AppContext.Provider value={{ stockCode, stockName, setStockInfo, legendData, setLegendData }}>
+                <AppContext.Provider value={{ stockCode, stockName, setStockInfo, legendData, setLegendData, latestData, setLatestData, isAnalyzing, setIsAnalyzing, timeRange, setTimeRange }}>
                     {children}
                 </AppContext.Provider>
             );
         }
 
-        // ---------- 완벽 분리형 프로 차트 컴포넌트 ----------
-        function TVChart({ data }) {
-            const chartContainerRef = useRef(null);
-            const { setLegendData } = useContext(AppContext);
-            const [timeRange, setTimeRange] = useState('ALL');
-            const chartRef = useRef(null);
+        const ToggleSwitch = ({ label, active, color, onClick }) => (
+            <div onClick={onClick} className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded cursor-pointer transition-colors border select-none ${active ? 'border-gray-500 bg-[#2a2e39]' : 'border-transparent opacity-50 hover:bg-[#2a2e39]'}`}>
+                <div className={`w-6 h-3.5 rounded-full relative transition-colors ${active ? color : 'bg-gray-600'}`}>
+                    <div className={`absolute top-[2px] w-2.5 h-2.5 rounded-full bg-white transition-all ${active ? 'left-[12px]' : 'left-[2px]'}`}></div>
+                </div>
+                <span className={`text-[0.7rem] font-bold tracking-wide ${active ? 'text-white' : 'text-gray-400'}`}>{label}</span>
+            </div>
+        );
+
+        function TVChart({ data, indicators }) {
+            const mainContainerRef = useRef(null);
+            const volContainerRef = useRef(null);
+            const rsiContainerRef = useRef(null);
+
+            const { setLegendData, timeRange } = useContext(AppContext);
+
+            const chartsRef = useRef({});
+            const seriesRefs = useRef({});
+            const srRefs = useRef([]);
 
             useEffect(() => {
-                if (!data || !chartContainerRef.current) return;
-                const { history } = data;
+                if (!data || !mainContainerRef.current || !volContainerRef.current || !rsiContainerRef.current) return;
+                const { history, latest } = data;
 
-                const chart = createChart(chartContainerRef.current, {
-                    layout: {
-                        background: { type: 'solid', color: '#131722' },
-                        textColor: '#8b95a1',
-                        fontSize: 11
-                    },
-                    grid: { vertLines: { color: 'rgba(42, 46, 57, 0.2)' }, horzLines: { color: 'rgba(42, 46, 57, 0.2)' } },
+                const commonOptions = {
+                    layout: { background: { type: 'solid', color: '#131722' }, textColor: '#8b95a1', fontSize: 11 },
+                    grid: { vertLines: { color: 'rgba(42, 46, 57, 0.15)' }, horzLines: { color: 'rgba(42, 46, 57, 0.15)' } },
                     crosshair: { mode: CrosshairMode.Normal },
-                    leftPriceScale: { visible: true, borderColor: '#2a2e39' },
-                    rightPriceScale: { visible: true, borderColor: '#2a2e39' },
-                    timeScale: { borderColor: '#2a2e39', timeVisible: false, rightOffset: 5 },
-                    localization: {
-                        locale: 'ko-KR', dateFormat: 'yyyy-MM-dd',
-                        priceFormatter: price => Math.floor(price).toLocaleString(),
-                    },
+                    rightPriceScale: { visible: true, borderColor: '#2a2e39', minimumWidth: 80 },
+                    leftPriceScale: { visible: false },
+                    localization: { locale: 'ko-KR', dateFormat: 'yyyy-MM-dd', priceFormatter: price => Math.floor(price).toLocaleString() },
                     autoSize: true,
+                };
+
+                // --- 1. 메인 차트 ---
+                const mainChart = createChart(mainContainerRef.current, {
+                    ...commonOptions,
+                    timeScale: { visible: false, borderColor: '#2a2e39' },
                 });
-                chartRef.current = chart;
+                chartsRef.current.main = mainChart;
+                mainChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
 
-                chart.priceScale('left').applyOptions({ scaleMargins: { top: 0.05, bottom: 0.35 } });
-                chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.05, bottom: 0.35 } });
-
-                const candleData = history.map(item => ({ time: item.time, open: item.open, high: item.high, low: item.low, close: item.close }));
-                const ma5Data = history.map(item => ({ time: item.time, value: item.ma5 })).filter(d => d.value);
-                const ma20Data = history.map(item => ({ time: item.time, value: item.ma20 })).filter(d => d.value);
-                const ma60Data = history.map(item => ({ time: item.time, value: item.ma60 })).filter(d => d.value);
-                const bbUpData = history.map(item => ({ time: item.time, value: item.bb_upper })).filter(d => d.value);
-                const bbLowData = history.map(item => ({ time: item.time, value: item.bb_lower })).filter(d => d.value);
-
-                // 스케일 동기화용 투명 캔들 (오른쪽 축)
-                const syncCandle = chart.addCandlestickSeries({
-                    priceScaleId: 'right',
-                    upColor: 'transparent', downColor: 'transparent', borderVisible: false, wickUpColor: 'transparent', wickDownColor: 'transparent',
-                    lastValueVisible: false, priceLineVisible: false
+                const candlestickSeries = mainChart.addCandlestickSeries({
+                    priceScaleId: 'right', upColor: '#ef5350', downColor: '#2962ff', borderVisible: false, wickUpColor: '#ef5350', wickDownColor: '#2962ff',
                 });
-                syncCandle.setData(candleData);
 
-                // 지표용 투명 라인 (왼쪽 축)
-                const invisibleOptions = { priceScaleId: 'left', color: 'transparent', lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false };
-                chart.addLineSeries(invisibleOptions).setData(ma5Data);
-                chart.addLineSeries(invisibleOptions).setData(ma20Data);
-                chart.addLineSeries(invisibleOptions).setData(ma60Data);
-                chart.addLineSeries(invisibleOptions).setData(bbUpData);
-                chart.addLineSeries(invisibleOptions).setData(bbLowData);
-
-                // 진짜 캔들스틱 (왼쪽 축)
-                const candlestickSeries = chart.addCandlestickSeries({
-                    priceScaleId: 'left',
-                    upColor: '#ef5350', downColor: '#2962ff', borderVisible: false,
-                    wickUpColor: '#ef5350', wickDownColor: '#2962ff',
-                });
-                candlestickSeries.setData(candleData);
-
+                const candleData = [];
                 const markers = [];
+                const seenTimes = new Set();
+
                 history.forEach(item => {
-                    if (item.signal) {
-                        const isWarning = item.signal.includes('저항') || item.signal.includes('상단');
-                        markers.push({
-                            time: item.time, position: isWarning ? 'aboveBar' : 'belowBar',
-                            color: isWarning ? '#ef5350' : '#2962ff', shape: isWarning ? 'arrowDown' : 'arrowUp',
-                        });
+                    if (!seenTimes.has(item.time)) {
+                        seenTimes.add(item.time);
+                        candleData.push({ time: item.time, open: item.open, high: item.high, low: item.low, close: item.close });
+
+                        if (item.signal) {
+                            const isWarning = item.signal.includes('저항') || item.signal.includes('상단');
+                            markers.push({
+                                time: item.time,
+                                position: isWarning ? 'aboveBar' : 'belowBar',
+                                color: isWarning ? '#ef5350' : '#2962ff',
+                                shape: isWarning ? 'arrowDown' : 'arrowUp',
+                                text: item.signal
+                            });
+                        }
                     }
                 });
-                candlestickSeries.setMarkers(markers);
 
-                // ⭐ 이평선/볼린저밴드 가로선 부활 (priceLineVisible: true)
-                const overlayOptions = { priceScaleId: 'right', lastValueVisible: true, priceLineVisible: true };
+                try {
+                    candlestickSeries.setData(candleData);
+                    if (markers.length > 0) candlestickSeries.setMarkers(markers);
+                } catch (e) { console.error("차트 렌더링 에러:", e); }
 
-                const ma5Series = chart.addLineSeries({ ...overlayOptions, color: '#ec4899', lineWidth: 1.5 });
-                ma5Series.setData(ma5Data);
-                const ma20Series = chart.addLineSeries({ ...overlayOptions, color: '#f59e0b', lineWidth: 1.5 });
-                ma20Series.setData(ma20Data);
-                const ma60Series = chart.addLineSeries({ ...overlayOptions, color: '#a855f7', lineWidth: 1.5 });
-                ma60Series.setData(ma60Data);
-                const bbUpSeries = chart.addLineSeries({ ...overlayOptions, color: '#787b86', lineWidth: 1, lineStyle: 2 });
-                bbUpSeries.setData(bbUpData);
-                const bbLowSeries = chart.addLineSeries({ ...overlayOptions, color: '#787b86', lineWidth: 1, lineStyle: 2 });
-                bbLowSeries.setData(bbLowData);
+                const linesConfig = [
+                    { id: 'sup5', price: latest.support_5, color: '#22c55e', lineWidth: 1 },
+                    { id: 'res5', price: latest.resist_5, color: '#ef5350', lineWidth: 1 },
+                    { id: 'sup20', price: latest.support_20, color: '#16a34a', lineWidth: 2 },
+                    { id: 'res20', price: latest.resist_20, color: '#dc2626', lineWidth: 2 },
+                    { id: 'sup60', price: latest.support_60, color: '#15803d', lineWidth: 3 },
+                    { id: 'res60', price: latest.resist_60, color: '#b91c1c', lineWidth: 3 },
+                ];
 
-                // 거래량
-                const volumeSeries = chart.addHistogramSeries({ priceScaleId: 'volume' });
-                chart.priceScale('volume').applyOptions({
-                    position: 'right', visible: true, scaleMargins: { top: 0.7, bottom: 0.15 },
+                linesConfig.forEach(config => {
+                    if (config.price) {
+                        const line = candlestickSeries.createPriceLine({
+                            price: config.price,
+                            color: indicators[config.id] ? config.color : 'transparent',
+                            lineWidth: config.lineWidth,
+                            lineStyle: 0,
+                            axisLabelVisible: false
+                        });
+                        srRefs.current.push({ id: config.id, line, color: config.color });
+                    }
                 });
+
+                const overlayOptions = {
+                    priceScaleId: 'right',
+                    lastValueVisible: false,
+                    lineStyle: 0,
+                    autoscaleInfoProvider: () => null,
+                    crosshairMarkerVisible: false
+                };
+
+                seriesRefs.current.ma5 = mainChart.addLineSeries({ ...overlayOptions, color: '#ec4899', lineWidth: 1.5 });
+                seriesRefs.current.ma5.setData(history.map(item => ({ time: item.time, value: item.ma5 })).filter(d => d.value !== null && d.value !== undefined));
+
+                seriesRefs.current.ma20 = mainChart.addLineSeries({ ...overlayOptions, color: '#f59e0b', lineWidth: 1.5 });
+                seriesRefs.current.ma20.setData(history.map(item => ({ time: item.time, value: item.ma20 })).filter(d => d.value !== null && d.value !== undefined));
+
+                seriesRefs.current.ma60 = mainChart.addLineSeries({ ...overlayOptions, color: '#a855f7', lineWidth: 1.5 });
+                seriesRefs.current.ma60.setData(history.map(item => ({ time: item.time, value: item.ma60 })).filter(d => d.value !== null && d.value !== undefined));
+
+                seriesRefs.current.bbUp = mainChart.addLineSeries({ ...overlayOptions, color: '#787b86', lineWidth: 1, priceLineVisible: false });
+                seriesRefs.current.bbUp.setData(history.map(item => ({ time: item.time, value: item.bb_upper })).filter(d => d.value !== null && d.value !== undefined));
+
+                seriesRefs.current.bbLow = mainChart.addLineSeries({ ...overlayOptions, color: '#787b86', lineWidth: 1, priceLineVisible: false });
+                seriesRefs.current.bbLow.setData(history.map(item => ({ time: item.time, value: item.bb_lower })).filter(d => d.value !== null && d.value !== undefined));
+
+                // --- 2. 거래량 차트 ---
+                const volChart = createChart(volContainerRef.current, {
+                    ...commonOptions,
+                    timeScale: { visible: false, borderColor: '#2a2e39' },
+                    crosshair: {
+                        mode: CrosshairMode.Normal,
+                        horzLine: { visible: false, labelVisible: false } // 거래량 차트 가로선/라벨 삭제
+                    }
+                });
+                chartsRef.current.vol = volChart;
+                const volumeSeries = volChart.addHistogramSeries({ priceScaleId: 'right' });
                 volumeSeries.setData(history.map((item, idx) => {
                     const prevClose = idx > 0 ? history[idx - 1].close : item.open;
                     return { time: item.time, value: item.volume, color: item.close >= prevClose ? 'rgba(239, 83, 80, 0.4)' : 'rgba(41, 98, 255, 0.4)' };
                 }));
 
-                // RSI(14)
-                const rsiSeries = chart.addLineSeries({ color: '#06b6d4', lineWidth: 1.5, priceScaleId: 'rsi' });
-                chart.priceScale('rsi').applyOptions({
-                    position: 'right', visible: true, scaleMargins: { top: 0.85, bottom: 0.0 },
+                // --- 3. RSI 차트 ---
+                const rsiChart = createChart(rsiContainerRef.current, {
+                    ...commonOptions,
+                    timeScale: { visible: true, borderColor: '#2a2e39', rightOffset: 5 },
+                    crosshair: {
+                        mode: CrosshairMode.Normal,
+                        horzLine: { visible: false, labelVisible: false } // RSI 차트 가로선/라벨 삭제
+                    }
                 });
-                rsiSeries.setData(history.map(item => ({ time: item.time, value: item.rsi })).filter(d => d.value));
+                chartsRef.current.rsi = rsiChart;
+                const rsiSeries = rsiChart.addLineSeries({ color: '#06b6d4', lineWidth: 1.5, priceScaleId: 'right' });
+                rsiSeries.setData(history.map(item => ({ time: item.time, value: item.rsi })).filter(d => d.value !== null && d.value !== undefined));
                 rsiSeries.createPriceLine({ price: 70, color: '#ef5350', lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
                 rsiSeries.createPriceLine({ price: 30, color: '#2962ff', lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
 
-                // 데이터 추출 및 Context 반영
-                const extractLegendData = (item, param) => {
-                    if (!item) return null;
-                    let m5 = item.ma5, m20 = item.ma20, m60 = item.ma60, bUp = item.bb_upper, bLow = item.bb_lower;
-                    if (param && param.seriesData) {
-                        const dM5 = param.seriesData.get(ma5Series); if (dM5) m5 = dM5.value;
-                        const dM20 = param.seriesData.get(ma20Series); if (dM20) m20 = dM20.value;
-                        const dM60 = param.seriesData.get(ma60Series); if (dM60) m60 = dM60.value;
-                        const dUp = param.seriesData.get(bbUpSeries); if (dUp) bUp = dUp.value;
-                        const dLow = param.seriesData.get(bbLowSeries); if (dLow) bLow = dLow.value;
+                mainChart.timeScale().subscribeVisibleLogicalRangeChange(r => { volChart.timeScale().setVisibleLogicalRange(r); rsiChart.timeScale().setVisibleLogicalRange(r); });
+                volChart.timeScale().subscribeVisibleLogicalRangeChange(r => { mainChart.timeScale().setVisibleLogicalRange(r); rsiChart.timeScale().setVisibleLogicalRange(r); });
+                rsiChart.timeScale().subscribeVisibleLogicalRangeChange(r => { mainChart.timeScale().setVisibleLogicalRange(r); volChart.timeScale().setVisibleLogicalRange(r); });
+
+                const updateLegend = (param) => {
+                    if (param.time) {
+                        const item = history.find(h => h.time === param.time);
+                        if (item) setLegendData({ ...item });
+                    } else {
+                        setLegendData({ ...history[history.length - 1] });
                     }
-                    return { ...item, ma5: m5, ma20: m20, ma60: m60, bb_upper: bUp, bb_lower: bLow };
                 };
 
-                setLegendData(extractLegendData(history[history.length - 1], null));
-                chart.subscribeCrosshairMove((param) => {
-                    if (param.time && param.seriesData.size > 0) {
-                        const item = history.find(h => h.time === param.time);
-                        setLegendData(extractLegendData(item, param));
-                    } else {
-                        setLegendData(extractLegendData(history[history.length - 1], null));
-                    }
-                });
+                mainChart.subscribeCrosshairMove(p => { updateLegend(p); if (p.time) { volChart.setCrosshairPosition(0, p.time, volumeSeries); rsiChart.setCrosshairPosition(0, p.time, rsiSeries); } else { volChart.clearCrosshairPosition(); rsiChart.clearCrosshairPosition(); } });
+                volChart.subscribeCrosshairMove(p => { updateLegend(p); if (p.time) { mainChart.setCrosshairPosition(0, p.time, candlestickSeries); rsiChart.setCrosshairPosition(0, p.time, rsiSeries); } else { mainChart.clearCrosshairPosition(); rsiChart.clearCrosshairPosition(); } });
+                rsiChart.subscribeCrosshairMove(p => { updateLegend(p); if (p.time) { mainChart.setCrosshairPosition(0, p.time, candlestickSeries); volChart.setCrosshairPosition(0, p.time, volumeSeries); } else { mainChart.clearCrosshairPosition(); volChart.clearCrosshairPosition(); } });
 
-                return () => chart.remove();
+                return () => { mainChart.remove(); volChart.remove(); rsiChart.remove(); };
             }, [data]);
 
-            // 기간 필터 기능
             useEffect(() => {
-                if (!chartRef.current || !data) return;
+                if (!seriesRefs.current.ma5) return;
+                const r = seriesRefs.current;
+
+                r.ma5.applyOptions({ visible: indicators.ma5 });
+                r.ma20.applyOptions({ visible: indicators.ma20 });
+                r.ma60.applyOptions({ visible: indicators.ma60 });
+                r.bbUp.applyOptions({ visible: indicators.bb });
+                r.bbLow.applyOptions({ visible: indicators.bb });
+
+                srRefs.current.forEach(item => {
+                    item.line.applyOptions({ color: indicators[item.id] ? item.color : 'rgba(0, 0, 0, 0)' });
+                });
+            }, [indicators]);
+
+            useEffect(() => {
+                if (!chartsRef.current.main || !data) return;
                 const { history } = data;
                 let range = history.length;
                 if (timeRange === '1M') range = 20;
                 if (timeRange === '3M') range = 60;
                 if (timeRange === '1Y') range = 250;
-
                 const visibleData = history.slice(Math.max(history.length - range, 0));
                 if (visibleData.length > 0) {
-                    chartRef.current.timeScale().setVisibleRange({
-                        from: visibleData[0].time,
-                        to: visibleData[visibleData.length - 1].time
-                    });
+                    chartsRef.current.main.timeScale().setVisibleRange({ from: visibleData[0].time, to: visibleData[visibleData.length - 1].time });
                 }
             }, [timeRange, data]);
 
             return (
-                <div className="relative w-full h-full flex flex-col">
-                    <div className="absolute top-2 right-[80px] z-20 flex bg-black/40 rounded p-1 backdrop-blur-sm border border-white/5">
-                        {['1M', '3M', '1Y', 'ALL'].map(range => (
-                            <button
-                                key={range} onClick={() => setTimeRange(range)}
-                                className={`px-3 py-1 text-xs font-bold rounded transition-colors ${timeRange === range ? 'bg-[#2962ff] text-white' : 'text-gray-400 hover:text-white'}`}
-                            >
-                                {range === 'ALL' ? '전체' : range}
-                            </button>
-                        ))}
+                <div className="w-full h-full flex flex-col relative bg-[#131722]">
+                    <div ref={mainContainerRef} className="flex-[6.5] w-full relative"></div>
+                    <div ref={volContainerRef} className="flex-[1.5] w-full relative border-t border-[#2a2e39]">
+                        <div className="absolute top-1 left-2 z-10 text-gray-500 text-xs font-bold pointer-events-none">거래량</div>
                     </div>
-
-                    <div className="flex-1 w-full relative" ref={chartContainerRef}>
-                        <div className="absolute bottom-[17%] left-16 z-10 text-gray-500 text-xs font-bold pointer-events-none">거래량</div>
-                        <div className="absolute bottom-[2%] left-16 z-10 text-[#06b6d4] text-xs font-bold pointer-events-none">RSI (14)</div>
+                    <div ref={rsiContainerRef} className="flex-[2.0] w-full relative border-t border-[#2a2e39]">
+                        <div className="absolute top-1 left-2 z-10 text-[#06b6d4] text-xs font-bold pointer-events-none">RSI (14)</div>
                     </div>
                 </div>
             );
         }
 
-        // ---------- AI 채팅 패널 ----------
         function ChatPanel() {
-            const { stockCode, setStockInfo } = useContext(AppContext);
+            const { setStockInfo, setLegendData, setLatestData, setIsAnalyzing } = useContext(AppContext);
             const [messages, setMessages] = useState([
-                { type: 'ai', text: '어떤 종목을 분석해드릴까요?' }
+                { type: 'ai', text: '어떤 종목을 분석해드릴까요?', isStreaming: false }
             ]);
             const [input, setInput] = useState('');
             const [loading, setLoading] = useState(false);
@@ -268,19 +347,78 @@
             const handleSend = async () => {
                 if (!input.trim() || loading) return;
                 const userMsg = input.trim();
-                setMessages(prev => [...prev, { type: 'user', text: userMsg }]);
+
+                setIsAnalyzing(true);
+                setStockInfo(null, null);
+                setLegendData(null);
+                setLatestData(null);
+
+                setMessages(prev => [...prev, { type: 'user', text: userMsg }, { type: 'ai', text: '', isStreaming: true }]);
                 setInput('');
                 setLoading(true);
 
                 try {
-                    const res = await fetch(`/ask_ai?question=${encodeURIComponent(userMsg)}`);
-                    const data = await res.json();
-                    setMessages(prev => [...prev, { type: 'ai', text: data.answer }]);
-                    if (data.stock_code) setStockInfo(data.stock_code, data.stock_name);
+                    const url = `/ask_ai?question=${encodeURIComponent(userMsg)}`;
+                    const res = await fetch(url);
+                    const reader = res.body.getReader();
+                    const decoder = new TextDecoder("utf-8");
+                    let done = false;
+                    let aiFullText = "";
+                    let buffer = "";
+
+                    while (!done) {
+                        const { value, done: readerDone } = await reader.read();
+                        done = readerDone;
+
+                        if (value) {
+                            buffer += decoder.decode(value, { stream: true });
+                            const parts = buffer.split('\n\n');
+                            buffer = parts.pop();
+
+                            for (const part of parts) {
+                                const lines = part.split('\n');
+                                for (const line of lines) {
+                                    if (line.startsWith('data: ')) {
+                                        const dataStr = line.replace('data: ', '').trim();
+                                        if (!dataStr) continue;
+                                        try {
+                                            const parsedData = JSON.parse(dataStr);
+                                            if (parsedData.type === 'metadata') {
+                                                if (parsedData.stock_code) {
+                                                    setStockInfo(parsedData.stock_code, parsedData.stock_name);
+                                                    setIsAnalyzing(false);
+                                                } else {
+                                                    setIsAnalyzing(false);
+                                                }
+                                            } else if (parsedData.type === 'chunk') {
+                                                aiFullText += parsedData.content;
+                                                setMessages(prev => {
+                                                    const newMsgs = [...prev];
+                                                    newMsgs[newMsgs.length - 1] = { type: 'ai', text: aiFullText, isStreaming: !done };
+                                                    return newMsgs;
+                                                });
+                                            }
+                                        } catch (e) { console.error("JSON 에러:", e); }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } catch (err) {
-                    setMessages(prev => [...prev, { type: 'ai', text: `오류: ${err.message}` }]);
+                    setMessages(prev => {
+                        const newMsgs = [...prev];
+                        newMsgs[newMsgs.length - 1] = { type: 'ai', text: `오류: ${err.message}`, isStreaming: false };
+                        return newMsgs;
+                    });
                 } finally {
                     setLoading(false);
+                    setIsAnalyzing(false);
+                    setMessages(prev => {
+                        const newMsgs = [...prev];
+                        const lastMsg = newMsgs[newMsgs.length - 1];
+                        if (lastMsg.type === 'ai') { lastMsg.isStreaming = false; }
+                        return newMsgs;
+                    });
                 }
             };
 
@@ -297,11 +435,10 @@
                         {messages.map((msg, i) => (
                             <div key={i} className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}>
                                 <div className={`max-w-[90%] rounded-xl px-5 py-4 ${msg.type === 'user' ? 'bg-[#2962ff] text-white rounded-br-sm' : 'bg-[#2a2e39] text-gray-200 rounded-tl-sm shadow-lg'}`}>
-                                    <div className="markdown-body" dangerouslySetInnerHTML={{ __html: marked.parse(msg.text) }} />
+                                    <div className={`markdown-body ${msg.isStreaming ? 'streaming-cursor' : ''}`} dangerouslySetInnerHTML={{ __html: marked.parse(msg.text) }} />
                                 </div>
                             </div>
                         ))}
-                        {loading && <div className="bg-[#2a2e39] rounded-xl px-5 py-4 text-gray-400 animate-pulse rounded-tl-sm w-fit">분석 중...</div>}
                         <div ref={messagesEndRef} />
                     </div>
                     <div className="p-4 bg-[#131722]/50 border-t border-[#2a2e39]">
@@ -315,67 +452,156 @@
             );
         }
 
-        // ---------- 메인 레이아웃 ----------
         function App() {
-            const { stockCode, stockName, legendData } = useContext(AppContext);
+            const { stockCode, stockName, legendData, latestData, setLatestData, isAnalyzing, timeRange, setTimeRange } = useContext(AppContext);
             const [chartData, setChartData] = useState(null);
 
+            const [indicators, setIndicators] = useState({
+                ma5: true, ma20: false, ma60: false,
+                bb: true,
+                sup5: true, res5: true,
+                sup20: false, res20: false,
+                sup60: false, res60: false
+            });
+
+            const toggle = (key) => setIndicators(prev => ({ ...prev, [key]: !prev[key] }));
+
+            const toggleGroup = (keys) => {
+                setIndicators(prev => {
+                    const allOn = keys.every(k => prev[k]);
+                    const nextState = { ...prev };
+                    keys.forEach(k => { nextState[k] = !allOn; });
+                    return nextState;
+                });
+            };
+
             useEffect(() => {
-                if (!stockCode) return;
+                if (!stockCode) { setChartData(null); setLatestData(null); return; }
+                setChartData(null);
                 fetch(`/api/chart_data?code=${encodeURIComponent(stockCode)}&name=${encodeURIComponent(stockName || '')}`)
                     .then(r => r.json())
-                    .then(data => { if (data.status === 'success') setChartData(data); });
+                    .then(data => {
+                        if (data.status === 'success') {
+                            setChartData(data);
+                            setLatestData(data.latest);
+                        }
+                    });
             }, [stockCode]);
+
+            const isLoading = isAnalyzing || (stockCode && !chartData);
 
             return (
                 <div className="flex w-full h-[100vh] bg-[#131722] overflow-hidden text-sm">
-                    {/* 차트 영역 */}
                     <div className="flex-1 flex flex-col h-full relative border-r border-[#1e222d] min-w-0">
-
-                        {/* 상단 데이터 헤더 */}
-                        <div className="w-full border-b border-[#1e222d] bg-[#131722]/95 z-40 px-5 py-3 shrink-0 flex flex-col justify-center">
-                            <div className="flex items-center gap-3">
-                                <span className="font-bold text-white text-xl tracking-tight">
-                                    {stockName || "종목을 검색해주세요"}
-                                    {stockCode && <span className="text-gray-500 text-sm ml-2 font-normal">{stockCode}</span>}
-                                </span>
-                                {legendData?.signal && (
-                                    <span className={`px-2 py-0.5 text-[0.7rem] font-bold rounded text-white ${legendData.signal.includes('저항') || legendData.signal.includes('상단') ? 'bg-[#ef5350]' : 'bg-[#2962ff]'}`}>
-                                        {legendData.signal.includes('저항') || legendData.signal.includes('상단') ? '🚨 매도주의 (단기고점)' : '💡 매수타점 (눌림목)'}
-                                    </span>
+                        <div className="w-full min-h-[65px] border-b border-[#1e222d] bg-[#131722]/95 z-40 px-5 py-3 shrink-0 flex justify-between items-center">
+                            <div className="flex flex-col justify-center w-full">
+                                {stockCode && !isLoading ? (
+                                    <>
+                                        <div className="flex items-center justify-between w-full">
+                                            <div className="flex items-center gap-3">
+                                                <span className="font-bold text-white text-xl tracking-tight">
+                                                    {stockName} <span className="text-gray-500 text-sm ml-2 font-normal">{stockCode}</span>
+                                                </span>
+                                            </div>
+                                            <div className="flex bg-[#1e222d] rounded p-1 border border-[#2a2e39] shrink-0 ml-4">
+                                                {['1M', '3M', '1Y', '전체'].map(range => {
+                                                    const val = range === '전체' ? 'ALL' : range;
+                                                    return (
+                                                        <button
+                                                            key={val} onClick={() => setTimeRange(val)}
+                                                            className={`px-3 py-1 text-xs font-bold rounded transition-colors ${timeRange === val ? 'bg-[#2962ff] text-white' : 'text-gray-400 hover:text-white'}`}
+                                                        >
+                                                            {range}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                        {legendData && (
+                                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-[0.75rem] font-mono">
+                                                <div className="flex gap-2">
+                                                    <span className="text-gray-400">종가 <span className="text-white ml-0.5 font-bold">{Math.floor(legendData.close).toLocaleString()}</span></span>
+                                                </div>
+                                                <div className="w-px h-3 bg-[#2a2e39]"></div>
+                                                <div className="flex gap-2 font-bold">
+                                                    {legendData.ma5 && <span className="text-[#ec4899]">5일 이평: {Math.floor(legendData.ma5).toLocaleString()}</span>}
+                                                    {legendData.ma20 && <span className="text-[#f59e0b]">20일 이평: {Math.floor(legendData.ma20).toLocaleString()}</span>}
+                                                    {legendData.ma60 && <span className="text-[#a855f7]">60일 이평: {Math.floor(legendData.ma60).toLocaleString()}</span>}
+                                                </div>
+                                                {latestData && (
+                                                    <>
+                                                        <div className="w-px h-3 bg-[#2a2e39]"></div>
+                                                        <div className="flex gap-2 font-bold opacity-80">
+                                                            {latestData.support_5 && <span className="text-[#22c55e]">5일 지지: {Math.floor(latestData.support_5).toLocaleString()}</span>}
+                                                            {latestData.resist_5 && <span className="text-[#ef5350]">5일 저항: {Math.floor(latestData.resist_5).toLocaleString()}</span>}
+                                                            {latestData.support_20 && <span className="text-[#16a34a]">20일 지지: {Math.floor(latestData.support_20).toLocaleString()}</span>}
+                                                            {latestData.resist_20 && <span className="text-[#dc2626]">20일 저항: {Math.floor(latestData.resist_20).toLocaleString()}</span>}
+                                                            {latestData.support_60 && <span className="text-[#15803d]">60일 지지: {Math.floor(latestData.support_60).toLocaleString()}</span>}
+                                                            {latestData.resist_60 && <span className="text-[#b91c1c]">60일 저항: {Math.floor(latestData.resist_60).toLocaleString()}</span>}
+                                                        </div>
+                                                    </>
+                                                )}
+                                                <div className="w-px h-3 bg-[#2a2e39]"></div>
+                                                <div className="flex gap-2 font-bold">
+                                                    <span className="text-[#06b6d4]">RSI: {legendData.rsi ? legendData.rsi.toFixed(1) : 0}</span>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                ) : (
+                                    <div className="text-gray-500 font-bold text-lg">AI 퀀트 차트 시스템</div>
                                 )}
                             </div>
-
-                            {legendData ? (
-                                <div className="flex flex-wrap items-center gap-x-5 gap-y-1 mt-2 text-[0.8rem] font-mono">
-                                    <div className="flex gap-3">
-                                        <span className="text-gray-400">시가 <span className="text-white ml-0.5">{Math.floor(legendData.open).toLocaleString()}</span></span>
-                                        <span className="text-gray-400">고가 <span className="text-[#ef5350] ml-0.5">{Math.floor(legendData.high).toLocaleString()}</span></span>
-                                        <span className="text-gray-400">저가 <span className="text-[#2962ff] ml-0.5">{Math.floor(legendData.low).toLocaleString()}</span></span>
-                                        <span className="text-gray-400">종가 <span className="text-white ml-0.5 font-bold text-[0.9rem]">{Math.floor(legendData.close).toLocaleString()}</span></span>
-                                    </div>
-                                    <div className="w-[1px] h-3 bg-[#2a2e39]"></div>
-                                    <div className="flex gap-3 font-bold">
-                                        {legendData.ma5 && <span className="text-[#ec4899]">MA5: {Math.floor(legendData.ma5).toLocaleString()}</span>}
-                                        {legendData.ma20 && <span className="text-[#f59e0b]">MA20: {Math.floor(legendData.ma20).toLocaleString()}</span>}
-                                        {legendData.ma60 && <span className="text-[#a855f7]">MA60: {Math.floor(legendData.ma60).toLocaleString()}</span>}
-                                    </div>
-                                    <div className="w-[1px] h-3 bg-[#2a2e39]"></div>
-                                    <div className="flex gap-3 font-bold">
-                                        <span className="text-gray-400">Vol: {Math.floor(legendData.volume).toLocaleString()}</span>
-                                        <span className="text-[#06b6d4]">RSI: {legendData.rsi ? legendData.rsi.toFixed(1) : 0}</span>
-                                    </div>
-                                    <div className="flex gap-3 font-bold">
-                                        <span className="text-gray-500 ml-2">({legendData.time})</span>
-                                    </div>
-                                </div>
-                            ) : (
-                                <div className="h-6 mt-2"></div>
-                            )}
                         </div>
 
-                        <div className="flex-1 w-full relative pt-2 pb-2 px-2">
-                            {chartData ? <TVChart data={chartData} /> : <div className="w-full h-full flex items-center justify-center text-gray-500">종목을 검색해주세요</div>}
+                        {chartData && !isLoading && (
+                            <div className="w-full bg-[#181c25] border-b border-[#2a2e39] px-4 py-2 flex flex-wrap gap-x-6 gap-y-2 items-center shrink-0 z-30">
+                                <div className="flex items-center gap-2">
+                                    <span onClick={() => toggleGroup(['ma5', 'ma20', 'ma60'])} className="text-gray-400 hover:text-white text-xs font-bold mr-1 cursor-pointer px-1.5 py-0.5 rounded transition-colors hover:bg-[#2a2e39]" title="전체 켜기/끄기">이평선</span>
+                                    <ToggleSwitch label="5일" color="bg-[#ec4899]" active={indicators.ma5} onClick={() => toggle('ma5')} />
+                                    <ToggleSwitch label="20일" color="bg-[#f59e0b]" active={indicators.ma20} onClick={() => toggle('ma20')} />
+                                    <ToggleSwitch label="60일" color="bg-[#a855f7]" active={indicators.ma60} onClick={() => toggle('ma60')} />
+                                </div>
+                                <div className="w-px h-4 bg-[#2a2e39]"></div>
+                                <div className="flex items-center gap-2">
+                                    <span onClick={() => toggle('bb')} className="text-gray-400 hover:text-white text-xs font-bold mr-1 cursor-pointer px-1.5 py-0.5 rounded transition-colors hover:bg-[#2a2e39]">볼린저</span>
+                                    <ToggleSwitch label="BB" color="bg-[#787b86]" active={indicators.bb} onClick={() => toggle('bb')} />
+                                </div>
+                                <div className="w-px h-4 bg-[#2a2e39]"></div>
+                                <div className="flex items-center gap-2">
+                                    <span onClick={() => toggleGroup(['sup5', 'sup20', 'sup60'])} className="text-[#22c55e] hover:text-white text-xs font-bold mr-1 cursor-pointer px-1.5 py-0.5 rounded transition-colors hover:bg-[#2a2e39]" title="전체 켜기/끄기">지지</span>
+                                    <ToggleSwitch label="5일" color="bg-[#22c55e]" active={indicators.sup5} onClick={() => toggle('sup5')} />
+                                    <ToggleSwitch label="20일" color="bg-[#16a34a]" active={indicators.sup20} onClick={() => toggle('sup20')} />
+                                    <ToggleSwitch label="60일" color="bg-[#15803d]" active={indicators.sup60} onClick={() => toggle('sup60')} />
+                                </div>
+                                <div className="w-px h-4 bg-[#2a2e39]"></div>
+                                <div className="flex items-center gap-2">
+                                    <span onClick={() => toggleGroup(['res5', 'res20', 'res60'])} className="text-[#ef5350] hover:text-white text-xs font-bold mr-1 cursor-pointer px-1.5 py-0.5 rounded transition-colors hover:bg-[#2a2e39]" title="전체 켜기/끄기">저항</span>
+                                    <ToggleSwitch label="5일" color="bg-[#ef5350]" active={indicators.res5} onClick={() => toggle('res5')} />
+                                    <ToggleSwitch label="20일" color="bg-[#dc2626]" active={indicators.res20} onClick={() => toggle('res20')} />
+                                    <ToggleSwitch label="60일" color="bg-[#b91c1c]" active={indicators.res60} onClick={() => toggle('res60')} />
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="flex-1 w-full relative min-h-0">
+                            {isLoading ? (
+                                <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 gap-4">
+                                    <div className="w-8 h-8 border-4 border-[#2a2e39] border-t-[#2962ff] rounded-full animate-spin"></div>
+                                    <div className="font-bold animate-pulse text-[#8b95a1]">
+                                        {isAnalyzing ? "AI가 데이터를 수집하고 차트를 그리는 중입니다..." : "차트 데이터를 불러오는 중입니다..."}
+                                    </div>
+                                </div>
+                            ) : chartData ? (
+                                <TVChart data={chartData} indicators={indicators} />
+                            ) : (
+                                <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 gap-4">
+                                    <div className="flex flex-col items-center gap-2">
+                                        <svg className="w-12 h-12 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                                        <span>우측 패널에 종목을 검색해주세요</span>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
 
