@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from postgrest import SyncPostgrestClient
 from dotenv import load_dotenv
+from langsmith.wrappers import wrap_openai
 
 warnings.filterwarnings('ignore')
 load_dotenv()
@@ -24,7 +25,7 @@ load_dotenv()
 # 1. 초기 설정 및 클라이언트
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = wrap_openai(openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY")))
 
 supabase = SyncPostgrestClient(
     f"{SUPABASE_URL}/rest/v1", 
