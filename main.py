@@ -258,6 +258,18 @@ def get_chart_data(code: str, name: str = ""):
         support_60 = float(df['Low'].rolling(60).min().iloc[-1])
         resist_60 = float(df['High'].rolling(60).max().iloc[-1])
 
+        if len(df) >= 2:
+            prev_high = float(df['High'].iloc[-2])
+            prev_low = float(df['Low'].iloc[-2])
+            prev_close = float(df['Close'].iloc[-2])
+            pivot = (prev_high + prev_low + prev_close) / 3
+            r1 = 2 * pivot - prev_low
+            s1 = 2 * pivot - prev_high
+            r2 = pivot + (prev_high - prev_low)
+            s2 = pivot - (prev_high - prev_low)
+        else:
+            pivot = r1 = s1 = r2 = s2 = None
+
         df = df.dropna(subset=['ma20']).tail(400)
 
         res = []
@@ -286,7 +298,8 @@ def get_chart_data(code: str, name: str = ""):
                 "price": latest['close'], "rsi": safe_round(latest['rsi']), "volume_ratio": safe_round(vol_ratio), "ma5": safe_round(latest['ma5']),
                 "support_5": safe_round(support_5), "resist_5": safe_round(resist_5),
                 "support_20": safe_round(support_20), "resist_20": safe_round(resist_20),
-                "support_60": safe_round(support_60), "resist_60": safe_round(resist_60)
+                "support_60": safe_round(support_60), "resist_60": safe_round(resist_60),
+                "pivot": safe_round(pivot), "s1": safe_round(s1), "s2": safe_round(s2), "r1": safe_round(r1), "r2": safe_round(r2)
             },
             "history": res
         }
