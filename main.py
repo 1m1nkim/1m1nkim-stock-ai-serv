@@ -19,6 +19,7 @@ from postgrest import SyncPostgrestClient
 from dotenv import load_dotenv
 from langsmith.wrappers import wrap_openai
 from functools import lru_cache
+from collections import Counter
 
 warnings.filterwarnings('ignore')
 load_dotenv()
@@ -412,6 +413,219 @@ def get_chart_data(code: str, name: str = "", interval: str = "1d"):
             "history": res
         }
     except Exception as e: return {"status": "error", "message": str(e)}
+
+@app.get("/fetch_dart")
+def fetch_dart():
+    try:
+        dart_api_key = os.getenv("DART_API_KEY")
+        if not dart_api_key:
+            return {"status": "error", "message": "DART_API_KEY가 설정되지 않았습니다."}
+
+        # 오늘 날짜 기준으로 검색
+        today = datetime.now().strftime("%Y%m%d")
+        url = "https://opendart.fss.or.kr/api/list.json"
+        
+        # pblntf_ty=B (주요사항보고서: 유/무상증자, 주식취득 등), I (수시공시: 수주, 영업잠정실적 등)
+        for doc_type in ['B', 'I']: 
+            params = {
+                "crtfc_key": dart_api_key,
+                "bgn_de": today,
+                "end_de": today,
+                "pblntf_ty": doc_type, 
+                "page_count": 100
+            }
+            res = requests.get(url, params=params).json()
+            
+            if res.get('status') == '000' and 'list' in res:
+                for item in res['list']:
+                    # 호재성 키워드가 포함된 공시만 필터링 (순도 100% 유지)
+                    title = item['report_nm']
+                    good_keywords = ["공급계약", "주식취득", "무상증자", "영업잠정실적", "타법인주식", "공개매수"]
+                    
+                    if any(k in title for k in good_keywords):
+                        corp_name = item['corp_nm']
+                        content = f"[{corp_name}] 전자공시: {title}"
+                        link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={item['rcp_no']}"
+                        
+                        # DB 중복 체크 후 저장 (기존 collect_news 로직 활용)
+                        if len(supabase.table("news_data").select("id").eq("url", link).execute().data) == 0:
+                            supabase.table("news_data").insert({
+                                "title": f"[공시] {corp_name} - {title}",
+                                "content": content,
+                                "source": "DART",
+                                "url": link,
+                                "embedding": get_embedding(f"{corp_name} {title}")
+                            }).execute()
+
+        return {"status": "success", "message": "DART 공시 수집 완료"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/fetch_kis_condition")
+def fetch_kis_condition(seq: str = "1"): 
+    # seq는 HTS에서 저장한 조건검색식의 번호입니다 (예: 0, 1, 2...)
+    try:
+        token = get_kis_token()
+        if not token:
+            return {"status": "error", "message": "한투 토큰 발급 실패"}
+
+        url = f"{KIS_URL}/uapi/domestic-stock/v1/quotations/psearch-result"
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": KIS_APP_KEY,
+            "appsecret": KIS_APP_SECRET,
+            "tr_id": "HHKST03900400", # 실시간 조건검색 TR ID
+            "custtype": "P"
+        }
+        params = {
+            "user_id": os.getenv("KIS_USER_ID"), 
+            "seq": seq, 
+            "mac_address": os.getenv("MAC_ADDRESS").replace(":", "").replace("-", "").lower(), # 특수문자 제거
+            "bpass_chk_yn": "N",
+            "clear_cmd_yn": "Y",
+            "pblc_cmd_yn": "N",
+            "out_func": "F",
+            "ent_expt_cmd_yn": "N",
+            "expt_cmd_yn": "N"
+        }
+
+        res = requests.get(url, headers=headers, params=params).json()
+        
+        # 💡 rt_cd가 '0'이면 무조건 통신 성공!
+        if res.get('rt_cd') == '0':
+            output2 = res.get('output2', [])
+            
+            # 포착된 종목이 없을 경우
+            if not output2:
+                return {"status": "success", "message": "현재 조건식에 포착된 종목이 없습니다.", "data": []}
+            
+            # 포착된 종목이 있을 경우
+            detected_stocks = []
+            for item in output2:
+                stock_name = item['name']
+                stock_code = item['code']
+                detected_stocks.append(f"{stock_name}({stock_code})")
+            
+            # 조건검색에 포착된 종목들을 DB에 리포트로 저장
+            title = f"[조건검색 포착] {len(detected_stocks)}종목 발굴"
+            content = "포착 종목: " + ", ".join(detected_stocks)
+            
+            # 💡 위에서 추가했던 related_stocks 태그 컬럼에도 종목을 넣어줍니다.
+            supabase.table("news_data").insert({
+                "title": title,
+                "content": content,
+                "source": "KIS_CONDITION",
+                "url": f"kis_cond_{datetime.now().strftime('%Y%m%d%H%M')}",
+                "related_stocks": ", ".join(detected_stocks), # 태그 저장
+                "embedding": get_embedding(content)
+            }).execute()
+                
+            return {"status": "success", "message": f"{len(detected_stocks)}개 종목 포착", "data": detected_stocks}
+            
+        return {"status": "error", "message": res.get('msg1')}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/ranked_stocks")
+async def get_ranked_stocks():
+    try:
+        # 1. 최근 DB 데이터 50개 긁어오기 (공시, 찌라시, 조건검색 모두 포함)
+        res = supabase.table("news_data").select("title, content, source, related_stocks").order("id", desc=True).limit(50).execute()
+        if not res.data:
+            return {"status": "error", "message": "DB에 데이터가 없습니다."}
+
+        # 2. 💡 방금 만든 '태그(related_stocks)'를 활용해 가장 많이 겹치는 핫한 종목 5개 추출!
+        all_stocks = []
+        for row in res.data:
+            if row.get('related_stocks') and row['related_stocks'].strip() != 'NONE':
+                # 콤마로 분리해서 리스트에 추가
+                stocks = [s.strip() for s in row['related_stocks'].split(',')]
+                all_stocks.extend(stocks)
+        
+        if not all_stocks:
+             return {"status": "error", "message": "데이터에서 종목 태그를 찾지 못했습니다."}
+
+        # 가장 많이 언급된 종목 Top 5 뽑기
+        top_5_tuples = Counter(all_stocks).most_common(5)
+        target_stocks = [t[0] for t in top_5_tuples] # 예: ['삼성전자(005930)', '하이트진로(000080)', ...]
+
+        # 3. 추출된 Top 5 종목의 최신 기술적 지표(차트) 수집
+        stock_contexts = []
+        recent_news_text = ""
+        
+        for stock_str in target_stocks:
+            # "종목명(종목코드)" 형태에서 파싱
+            if "(" in stock_str and ")" in stock_str:
+                name = stock_str.split("(")[0]
+                code = stock_str.split("(")[1].replace(")", "")
+            else:
+                name, code = find_stock(stock_str)
+            
+            if code:
+                tech_info = get_technical_analysis(name, code)
+                stock_contexts.append(f"[{name}({code})]\n{tech_info}")
+                
+                # 이 종목이 포함된 최근 뉴스/공시 텍스트도 컨텍스트에 추가
+                relevant_news = [r for r in res.data if name in (r.get('related_stocks') or '')][:2]
+                for rn in relevant_news:
+                    recent_news_text += f"- [{rn['source']}] {rn['title']}\n"
+
+        if not stock_contexts:
+             return {"status": "error", "message": "종목 기술적 지표를 불러오지 못했습니다."}
+
+        combined_tech = "\n\n".join(stock_contexts)
+
+        # 4. AI 퀀트 스코어링 (무조건 JSON 뱉기)
+        ranking_prompt = f"""
+        당신은 AI 퀀트 엔진입니다. 아래의 [최근 호재/데이터]와 [차트 지표]를 분석하여 각 종목의 단기 상승 확률을 0~100점으로 평가하세요.
+        반드시 아래 JSON 형식으로만 응답하세요.
+
+        [최근 호재/데이터]
+        {recent_news_text}
+
+        [차트 지표]
+        {combined_tech}
+
+        [출력 포맷 (반드시 JSON)]
+        {{
+          "stocks": [
+            {{
+              "code": "005930",
+              "name": "삼성전자",
+              "score": 85,
+              "reason": "조건검색 포착 및 20일선 지지 확인",
+              "target_price": 85000,
+              "stop_loss": 78000
+            }}
+          ]
+        }}
+        """
+
+        score_res = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": ranking_prompt}],
+            response_format={ "type": "json_object" } # JSON 강제!
+        )
+
+        raw_json = score_res.choices[0].message.content
+        parsed_data = json.loads(raw_json)
+        stocks_list = parsed_data.get("stocks", [])
+        sorted_stocks = sorted(stocks_list, key=lambda x: x.get('score', 0), reverse=True)
+
+        return {"status": "success", "data": sorted_stocks}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/debug_mac")
+def debug_mac():
+    raw = os.getenv("MAC_ADDRESS", "없음")
+    cleaned = raw.replace(":", "").replace("-", "")
+    return {
+        "raw": raw,
+        "cleaned": cleaned,
+        "length": len(cleaned)  # 반드시 12자리여야 함
+    }
 
 @app.get("/")
 def serve_ui(): return FileResponse("index.html")
