@@ -70,7 +70,7 @@ def get_kis_token():
     return None
 
 # ==========================================
-# 3. 글로벌 차트 데이터 캐시 (1분 새로고침 구현)
+# 3. 글로벌 차트 데이터 캐시
 # ==========================================
 CHART_CACHE = {}
 
@@ -133,14 +133,13 @@ def find_stock(question: str):
     return None, None
 
 # ==========================================
-# 5. 핵심 로직: YFinance 과거데이터 + KIS 최신데이터 완벽 병합엔진
+# 5. 핵심 로직: YFinance 과거데이터 + KIS 최신데이터 병합엔진
 # ==========================================
 def fetch_merged_chart_data(code: str, interval: str):
     is_us = code.startswith("US:")
     ticker = code.replace("US:", "") if is_us else code
     is_intraday = interval.endswith('m')
     
-    # 💡 1단계: 주봉/월봉이라도 일단 '일봉(1d)'으로 통일해서 YF 과거데이터를 긁어옵니다.
     yf_int_map = {'1m':'1m', '3m':'1m', '5m':'5m', '15m':'15m', '60m':'60m', '1d':'1d', '1w':'1d', '1M':'1d'}
     yf_per_map = {'1m':'7d', '3m':'7d', '5m':'60d', '15m':'60d', '60m':'730d', '1d':'2y', '1w':'5y', '1M':'10y'}
     
@@ -157,23 +156,21 @@ def fetch_merged_chart_data(code: str, interval: str):
             
     df_yf = pd.DataFrame()
     try:
-        df_yf = yf.download(yf_ticker, period=yf_per, interval=yf_int, prepost=True, progress=False)
+        # 💡 미장 프리/애프터장 포함 옵션 유지
+        df_yf = yf.download(yf_ticker, period=yf_per, interval=yf_int, prepost=is_us, progress=False)
         if not df_yf.empty:
             if isinstance(df_yf.columns, pd.MultiIndex): 
                 df_yf.columns = df_yf.columns.droplevel(1)
-            # 타임존 제거하여 한국 시간과 완전히 일치시킵니다.
             if getattr(df_yf.index, 'tz', None) is not None:
                 df_yf.index = df_yf.index.tz_convert('Asia/Seoul').tz_localize(None)
     except Exception as e:
         print("YFinance Fetch Error:", e)
 
-    # 💡 2단계: 한투 API로 실시간 최신 틱 가져오기 (지연 방지용)
     df_kis = pd.DataFrame()
     token = get_kis_token()
     if token and not is_us:
         try:
             if not is_intraday:
-                # 주/월봉이라도 무조건 일봉으로 가져옵니다 (중복 방지)
                 url = f"{KIS_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
                 headers = { "content-type": "application/json", "authorization": f"Bearer {token}", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET, "tr_id": "FHKST03010100", "custtype": "P" }
                 params = { "FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker, "FID_INPUT_DATE_1": "", "FID_INPUT_DATE_2": "", "FID_PERIOD_DIV_CODE": "D", "FID_ORG_ADJ_PRC": "1" }
@@ -186,7 +183,6 @@ def fetch_merged_chart_data(code: str, interval: str):
                     df_kis.set_index('Datetime', inplace=True)
                     df_kis.drop(['Date'], axis=1, inplace=True)
             else:
-                # 분봉은 1분봉 최신 틱을 가져와서 20분 지연을 메꿉니다.
                 url = f"{KIS_URL}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
                 headers = { "content-type": "application/json", "authorization": f"Bearer {token}", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET, "tr_id": "FHKST03010200", "custtype": "P" }
                 params = { "FID_ETC_CLS_CODE": "", "FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker, "FID_INPUT_HOUR_1": "153000", "FID_PW_DATA_INCU_YN": "N" }
@@ -204,57 +200,38 @@ def fetch_merged_chart_data(code: str, interval: str):
         except Exception as e:
             print("KIS Patch Error:", e)
 
-    # 💡 3단계: 과거(YF)와 현재(KIS) 데이터 완벽 병합 (Concat)
     if not df_yf.empty and not df_kis.empty:
         df = pd.concat([df_yf, df_kis])
-        # 중복되는 시간이 있다면 KIS(실시간) 최신 데이터를 우선 보존합니다.
         df = df[~df.index.duplicated(keep='last')].sort_index()
-    elif not df_yf.empty:
-        df = df_yf
-    elif not df_kis.empty:
-        df = df_kis
-    else:
-        df = pd.DataFrame()
+    elif not df_yf.empty: df = df_yf
+    elif not df_kis.empty: df = df_kis
+    else: df = pd.DataFrame()
 
-    # (최후의 안전망)
     if df.empty and not is_intraday:
         df = fdr.DataReader(ticker).tail(500)
 
-    # 💡 4단계: 찌꺼기 방지를 위한 최종 마스터 리샘플링! (여기서 1분/일봉 데이터를 요구사항에 맞춰 묶습니다)
     if not df.empty:
         if is_intraday:
-            # Pandas 최신 문법(T -> min)으로 에러 방지
             rule = interval.replace('m', 'min')
             df = df.resample(rule, label='left', closed='left').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
         else:
-            if interval == '1w':
-                # 금요일 기준으로 한 주 묶기
-                df = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
-            elif interval == '1M':
-                # 월말 기준으로 한 달 묶기
-                df = df.resample('ME').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+            if interval == '1w': df = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+            elif interval == '1M': df = df.resample('ME').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
 
     return df, "달러" if is_us else "원"
 
 def get_data_with_ttl_cache(code: str, interval: str):
-    """1분 단위로 캐싱(새로고침) 하는 함수"""
     global CHART_CACHE
     now = time.time()
     cache_key = f"{code}_{interval}"
     
-    # 캐시가 있고 60초가 지나지 않았다면 API 통신 없이 0.01초 만에 메모리 반환
     if cache_key in CHART_CACHE:
         cached_df, timestamp = CHART_CACHE[cache_key]
         if now - timestamp < 60:
-            print(f"⚡ [{cache_key}] 메모리 캐시 사용 (남은 수명: {int(60 - (now - timestamp))}초)")
             return cached_df.copy(), "달러" if code.startswith("US:") else "원"
             
-    print(f"🌐 [{cache_key}] 60초 경과. API 새로 호출 및 캐시 갱신 중...")
     df, unit = fetch_merged_chart_data(code, interval)
-    
-    if not df.empty:
-        CHART_CACHE[cache_key] = (df, now)
-    
+    if not df.empty: CHART_CACHE[cache_key] = (df, now)
     return df, unit
 
 def get_technical_analysis(name: str, code: str) -> str:
@@ -350,10 +327,17 @@ async def ask_ai(question: str):
 @app.get("/api/chart_data")
 def get_chart_data(code: str, name: str = "", interval: str = "1d"):
     try:
+        # 1. 메인 차트 데이터 (현재 보고 있는 타임프레임)
         df, _ = get_data_with_ttl_cache(code, interval)
+        
+        # 2. 💡 피봇 & 고정 지지저항을 위해 '일봉(1d)' 데이터를 무조건 백그라운드에서 가져옵니다.
+        daily_df, _ = get_data_with_ttl_cache(code, "1d")
+
         if df.empty or len(df) < 2: return {"status": "error", "message": "데이터 부족"}
 
         df = df.copy()
+        
+        # --- 유동 지표 (보고 있는 차트에 맞춰 변함) ---
         df['ma5'] = df['Close'].rolling(5).mean()
         df['ma20'] = df['Close'].rolling(20).mean()
         df['ma60'] = df['Close'].rolling(60).mean()
@@ -367,23 +351,29 @@ def get_chart_data(code: str, name: str = "", interval: str = "1d"):
         loss = (-delta.clip(upper=0)).rolling(14).mean()
         df['rsi'] = 100 - 100 / (1 + gain / loss)
 
-        support_5 = float(df['Low'].rolling(5).min().iloc[-1])
-        resist_5 = float(df['High'].rolling(5).max().iloc[-1])
-        support_20 = float(df['Low'].rolling(20).min().iloc[-1])
-        resist_20 = float(df['High'].rolling(20).max().iloc[-1])
-        support_60 = float(df['Low'].rolling(60).min().iloc[-1])
-        resist_60 = float(df['High'].rolling(60).max().iloc[-1])
+        # --- 💡 고정 지표 (무조건 일봉 기준으로 계산되어 모든 분봉 차트에서 동일한 위치에 고정됨) ---
+        if not daily_df.empty and len(daily_df) >= 2:
+            # 기간 지지/저항 (일봉 기준)
+            support_5 = float(daily_df['Low'].rolling(5).min().iloc[-1])
+            resist_5 = float(daily_df['High'].rolling(5).max().iloc[-1])
+            support_20 = float(daily_df['Low'].rolling(20).min().iloc[-1])
+            resist_20 = float(daily_df['High'].rolling(20).max().iloc[-1])
+            support_60 = float(daily_df['Low'].rolling(60).min().iloc[-1])
+            resist_60 = float(daily_df['High'].rolling(60).max().iloc[-1])
 
-        if len(df) >= 2:
-            prev_high = float(df['High'].iloc[-2])
-            prev_low = float(df['Low'].iloc[-2])
-            prev_close = float(df['Close'].iloc[-2])
+            # 당일 피봇 및 지지/저항 (어제(전일) 일봉 캔들 기준)
+            prev_day = daily_df.iloc[-2]
+            prev_high = float(prev_day['High'])
+            prev_low = float(prev_day['Low'])
+            prev_close = float(prev_day['Close'])
+            
             pivot = (prev_high + prev_low + prev_close) / 3
             r1 = 2 * pivot - prev_low
             s1 = 2 * pivot - prev_high
             r2 = pivot + (prev_high - prev_low)
             s2 = pivot - (prev_high - prev_low)
         else:
+            support_5 = resist_5 = support_20 = resist_20 = support_60 = resist_60 = None
             pivot = r1 = s1 = r2 = s2 = None
 
         df = df.dropna(subset=['ma20'])
@@ -393,7 +383,6 @@ def get_chart_data(code: str, name: str = "", interval: str = "1d"):
         for idx, row in df.iterrows():
             price = float(row['Close'])
             res.append({
-                # 프론트엔드의 완벽한 처리를 위해, 분봉은 시간까지, 일봉은 날짜만 던집니다.
                 "time": idx.isoformat() if is_intraday else idx.strftime('%Y-%m-%d'), 
                 "open": float(row['Open']) if 'Open' in row else price, "high": float(row['High']) if 'High' in row else price,
                 "low": float(row['Low']) if 'Low' in row else price, "close": price,
@@ -414,6 +403,7 @@ def get_chart_data(code: str, name: str = "", interval: str = "1d"):
             "status": "success", "stock_code": code, "stock_name": name,
             "latest": {
                 "price": latest['close'], "rsi": safe_round(latest['rsi']), "volume_ratio": safe_round(vol_ratio), "ma5": safe_round(latest['ma5']),
+                # 고정 지표들을 프론트로 쏴줍니다
                 "support_5": safe_round(support_5), "resist_5": safe_round(resist_5),
                 "support_20": safe_round(support_20), "resist_20": safe_round(resist_20),
                 "support_60": safe_round(support_60), "resist_60": safe_round(resist_60),

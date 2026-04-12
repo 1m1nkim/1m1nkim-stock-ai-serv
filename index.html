@@ -139,11 +139,14 @@
             const volContainerRef = useRef(null);
             const rsiContainerRef = useRef(null);
 
-            const { setLegendData, interval } = useContext(AppContext);
+            const { setLegendData, interval, stockCode } = useContext(AppContext);
 
             const chartsRef = useRef({});
             const seriesRefs = useRef({});
             const srRefs = useRef([]);
+
+            // 💡 종목이 미국 주식인지 판단 (소수점 표기를 위해)
+            const isUS = stockCode && stockCode.startsWith("US:");
 
             useEffect(() => {
                 if (!data || !mainContainerRef.current || !volContainerRef.current || !rsiContainerRef.current) return;
@@ -187,7 +190,12 @@
                         secondsVisible: false,
                         borderColor: '#2a2e39',
                     },
-                    localization: { locale: 'ko-KR', dateFormat: 'yyyy-MM-dd', priceFormatter: price => Math.floor(price).toLocaleString() },
+                    localization: {
+                        locale: 'ko-KR',
+                        dateFormat: 'yyyy-MM-dd',
+                        // 💡 차트 Y축 눈금 포맷 설정 (미국주식이면 소수점 둘째 자리, 아니면 정수)
+                        priceFormatter: price => isUS ? price.toFixed(2) : Math.floor(price).toLocaleString()
+                    },
                     autoSize: true,
                 };
 
@@ -200,13 +208,21 @@
                 mainChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
 
                 const candlestickSeries = mainChart.addCandlestickSeries({
-                    priceScaleId: 'right', upColor: '#ef5350', downColor: '#2962ff', borderVisible: false, wickUpColor: '#ef5350', wickDownColor: '#2962ff',
+                    priceScaleId: 'right',
+                    upColor: '#ef5350',
+                    downColor: '#2962ff',
+                    borderVisible: false,
+                    wickUpColor: '#ef5350',
+                    wickDownColor: '#2962ff',
+
+                    priceLineColor: '#2962ff',
+                    priceLineWidth: 1,
+                    priceLineStyle: 3,
                 });
 
                 const candleData = uniqueHistory.map(item => ({ time: item.time, open: item.open, high: item.high, low: item.low, close: item.close }));
                 candlestickSeries.setData(candleData);
 
-                // 💡 지지/저항선 색상 통일 (기간: 초록 계열 / 당일: 보라 계열)
                 const linesConfig = [
                     { stateKey: 'sr5', price: latest.support_5, color: '#22c55e', lineWidth: 1 },
                     { stateKey: 'sr5', price: latest.resist_5, color: '#22c55e', lineWidth: 1 },
@@ -234,7 +250,6 @@
 
                 const overlayOptions = { priceScaleId: 'right', lastValueVisible: false, lineStyle: 0, autoscaleInfoProvider: () => null, crosshairMarkerVisible: false };
 
-                // 이동평균선
                 seriesRefs.current.ma5 = mainChart.addLineSeries({ ...overlayOptions, color: '#ec4899', lineWidth: 1.5, visible: indicators.ma5, priceLineVisible: indicators.ma5 });
                 seriesRefs.current.ma5.setData(uniqueHistory.map(item => ({ time: item.time, value: item.ma5 })).filter(d => d.value !== null && d.value !== undefined));
 
@@ -244,7 +259,6 @@
                 seriesRefs.current.ma60 = mainChart.addLineSeries({ ...overlayOptions, color: '#a855f7', lineWidth: 1.5, visible: indicators.ma60, priceLineVisible: indicators.ma60 });
                 seriesRefs.current.ma60.setData(uniqueHistory.map(item => ({ time: item.time, value: item.ma60 })).filter(d => d.value !== null && d.value !== undefined));
 
-                // 💡 볼린저 밴드 추가 (회색)
                 seriesRefs.current.bb_upper = mainChart.addLineSeries({ ...overlayOptions, color: '#9ca3af', lineWidth: 1, visible: indicators.bb, priceLineVisible: false });
                 seriesRefs.current.bb_upper.setData(uniqueHistory.map(item => ({ time: item.time, value: item.bb_upper })).filter(d => d.value !== null && d.value !== undefined));
 
@@ -292,9 +306,8 @@
                 rsiChart.subscribeCrosshairMove(p => { updateLegend(p); if (p.time) { mainChart.setCrosshairPosition(0, p.time, candlestickSeries); volChart.setCrosshairPosition(0, p.time, volumeSeries); } else { mainChart.clearCrosshairPosition(); volChart.clearCrosshairPosition(); } });
 
                 return () => { mainChart.remove(); volChart.remove(); rsiChart.remove(); };
-            }, [data]);
+            }, [data, isUS]); // 💡 isUS가 바뀔 때 차트도 갱신되도록 의존성 추가
 
-            // 스위치 변경 시 차트에 즉각 반영 (볼린저 밴드 포함)
             useEffect(() => {
                 const r = seriesRefs.current;
                 if (r.ma5) r.ma5.applyOptions({ visible: indicators.ma5, priceLineVisible: indicators.ma5 });
@@ -439,7 +452,6 @@
             const { stockCode, stockName, legendData, latestData, setLatestData, isAnalyzing, interval, setInterval } = useContext(AppContext);
             const [chartData, setChartData] = useState(null);
 
-            // 💡 볼린저 밴드(bb) 스위치 상태를 추가했습니다.
             const [indicators, setIndicators] = useState({
                 ma5: true, ma20: false, ma60: false, bb: false,
                 sr5: true, sr20: false, sr60: false,
@@ -470,6 +482,13 @@
             }, [stockCode, interval]);
 
             const isLoading = isAnalyzing || (stockCode && !chartData);
+
+            // 💡 종목명 기반으로 미국 주식 여부 확인 및 가격 포맷팅 함수
+            const isUS = stockCode && stockCode.startsWith("US:");
+            const formatPrice = (val) => {
+                if (val === null || val === undefined) return '';
+                return isUS ? Number(val).toFixed(2) : Math.floor(val).toLocaleString();
+            };
 
             return (
                 <div className="flex w-full h-[100vh] bg-[#131722] overflow-hidden text-sm">
@@ -503,33 +522,32 @@
                                         {legendData && (
                                             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-[0.75rem] font-mono">
                                                 <div className="flex gap-2">
-                                                    <span className="text-gray-400">종가 <span className="text-white ml-0.5 font-bold">{Math.floor(legendData.close).toLocaleString()}</span></span>
+                                                    <span className="text-gray-400">종가 <span className="text-white ml-0.5 font-bold">{formatPrice(legendData.close)}</span></span>
                                                 </div>
                                                 <div className="w-px h-3 bg-[#2a2e39]"></div>
                                                 <div className="flex gap-2 font-bold">
-                                                    {indicators.ma5 && legendData.ma5 && <span className="text-[#ec4899]">5선: {Math.floor(legendData.ma5).toLocaleString()}</span>}
-                                                    {indicators.ma20 && legendData.ma20 && <span className="text-[#f59e0b]">20선: {Math.floor(legendData.ma20).toLocaleString()}</span>}
-                                                    {indicators.ma60 && legendData.ma60 && <span className="text-[#a855f7]">60선: {Math.floor(legendData.ma60).toLocaleString()}</span>}
+                                                    {indicators.ma5 && legendData.ma5 && <span className="text-[#ec4899]">5선: {formatPrice(legendData.ma5)}</span>}
+                                                    {indicators.ma20 && legendData.ma20 && <span className="text-[#f59e0b]">20선: {formatPrice(legendData.ma20)}</span>}
+                                                    {indicators.ma60 && legendData.ma60 && <span className="text-[#a855f7]">60선: {formatPrice(legendData.ma60)}</span>}
                                                 </div>
                                                 {latestData && (
                                                     <>
                                                         <div className="w-px h-3 bg-[#2a2e39]"></div>
                                                         <div className="flex gap-2 font-bold opacity-80">
-                                                            {/* 💡 범례 색상도 통일된 색상에 맞추어 변경했습니다 */}
-                                                            {indicators.sr5 && latestData.support_5 && <span className="text-[#22c55e]">5선 지지: {Math.floor(latestData.support_5).toLocaleString()}</span>}
-                                                            {indicators.sr5 && latestData.resist_5 && <span className="text-[#22c55e]">5선 저항: {Math.floor(latestData.resist_5).toLocaleString()}</span>}
-                                                            {indicators.sr20 && latestData.support_20 && <span className="text-[#16a34a]">20선 지지: {Math.floor(latestData.support_20).toLocaleString()}</span>}
-                                                            {indicators.sr20 && latestData.resist_20 && <span className="text-[#16a34a]">20선 저항: {Math.floor(latestData.resist_20).toLocaleString()}</span>}
-                                                            {indicators.sr60 && latestData.support_60 && <span className="text-[#15803d]">60선 지지: {Math.floor(latestData.support_60).toLocaleString()}</span>}
-                                                            {indicators.sr60 && latestData.resist_60 && <span className="text-[#15803d]">60선 저항: {Math.floor(latestData.resist_60).toLocaleString()}</span>}
+                                                            {indicators.sr5 && latestData.support_5 && <span className="text-[#22c55e]">5선 지지: {formatPrice(latestData.support_5)}</span>}
+                                                            {indicators.sr5 && latestData.resist_5 && <span className="text-[#22c55e]">5선 저항: {formatPrice(latestData.resist_5)}</span>}
+                                                            {indicators.sr20 && latestData.support_20 && <span className="text-[#16a34a]">20선 지지: {formatPrice(latestData.support_20)}</span>}
+                                                            {indicators.sr20 && latestData.resist_20 && <span className="text-[#16a34a]">20선 저항: {formatPrice(latestData.resist_20)}</span>}
+                                                            {indicators.sr60 && latestData.support_60 && <span className="text-[#15803d]">60선 지지: {formatPrice(latestData.support_60)}</span>}
+                                                            {indicators.sr60 && latestData.resist_60 && <span className="text-[#15803d]">60선 저항: {formatPrice(latestData.resist_60)}</span>}
                                                         </div>
                                                         <div className="w-px h-3 bg-[#2a2e39]"></div>
                                                         <div className="flex gap-2 font-bold opacity-80">
-                                                            {indicators.pivot && latestData.pivot && <span className="text-[#eab308]">당일 중심: {Math.floor(latestData.pivot).toLocaleString()}</span>}
-                                                            {indicators.sr1 && latestData.s1 && <span className="text-[#d946ef]">1차 지지: {Math.floor(latestData.s1).toLocaleString()}</span>}
-                                                            {indicators.sr1 && latestData.r1 && <span className="text-[#d946ef]">1차 저항: {Math.floor(latestData.r1).toLocaleString()}</span>}
-                                                            {indicators.sr2 && latestData.s2 && <span className="text-[#c026d3]">2차 지지: {Math.floor(latestData.s2).toLocaleString()}</span>}
-                                                            {indicators.sr2 && latestData.r2 && <span className="text-[#c026d3]">2차 저항: {Math.floor(latestData.r2).toLocaleString()}</span>}
+                                                            {indicators.pivot && latestData.pivot && <span className="text-[#eab308]">당일 중심: {formatPrice(latestData.pivot)}</span>}
+                                                            {indicators.sr1 && latestData.s1 && <span className="text-[#d946ef]">1차 지지: {formatPrice(latestData.s1)}</span>}
+                                                            {indicators.sr1 && latestData.r1 && <span className="text-[#d946ef]">1차 저항: {formatPrice(latestData.r1)}</span>}
+                                                            {indicators.sr2 && latestData.s2 && <span className="text-[#c026d3]">2차 지지: {formatPrice(latestData.s2)}</span>}
+                                                            {indicators.sr2 && latestData.r2 && <span className="text-[#c026d3]">2차 저항: {formatPrice(latestData.r2)}</span>}
                                                         </div>
                                                     </>
                                                 )}
@@ -549,7 +567,6 @@
                         {chartData && !isLoading && (
                             <div className="w-full bg-[#181c25] border-b border-[#2a2e39] px-4 py-2 flex flex-wrap gap-x-6 gap-y-2 items-center shrink-0 z-30">
                                 <div className="flex items-center gap-2">
-                                    {/* 💡 볼린저 밴드 스위치를 이평선 그룹에 추가했습니다 */}
                                     <span onClick={() => toggleGroup(['ma5', 'ma20', 'ma60', 'bb'])} className="text-gray-400 hover:text-white text-xs font-bold mr-1 cursor-pointer px-1.5 py-0.5 rounded transition-colors hover:bg-[#2a2e39]" title="전체 켜기/끄기">이평선 / 볼린저</span>
                                     <ToggleSwitch label="5선" color="bg-[#ec4899]" active={indicators.ma5} onClick={() => toggle('ma5')} />
                                     <ToggleSwitch label="20선" color="bg-[#f59e0b]" active={indicators.ma20} onClick={() => toggle('ma20')} />
@@ -571,8 +588,8 @@
                                 <div className="w-px h-4 bg-[#2a2e39]"></div>
                                 <div className="flex items-center gap-2">
                                     <span onClick={() => toggleGroup(['sr1', 'sr2'])} className="text-gray-400 hover:text-white text-xs font-bold mr-1 cursor-pointer px-1.5 py-0.5 rounded transition-colors hover:bg-[#2a2e39]">당일 지지/저항</span>
-                                    <ToggleSwitch label="1차" color="bg-[#d946ef]" active={indicators.sr1} onClick={() => toggle('sr1')} />
-                                    <ToggleSwitch label="2차" color="bg-[#c026d3]" active={indicators.sr2} onClick={() => toggle('sr2')} />
+                                    <ToggleSwitch label="1차" color="bg-[#0ea5e9]" active={indicators.sr1} onClick={() => toggle('sr1')} />
+                                    <ToggleSwitch label="2차" color="bg-[#0284c7]" active={indicators.sr2} onClick={() => toggle('sr2')} />
                                 </div>
                             </div>
                         )}
