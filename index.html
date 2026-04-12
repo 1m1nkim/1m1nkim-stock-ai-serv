@@ -115,11 +115,11 @@
             const [legendData, setLegendData] = useState(null);
             const [latestData, setLatestData] = useState(null);
             const [isAnalyzing, setIsAnalyzing] = useState(false);
-            const [timeRange, setTimeRange] = useState('ALL');
+            const [interval, setInterval] = useState('1d');
 
             const setStockInfo = (code, name) => { setStockCode(code); setStockName(name); };
             return (
-                <AppContext.Provider value={{ stockCode, stockName, setStockInfo, legendData, setLegendData, latestData, setLatestData, isAnalyzing, setIsAnalyzing, timeRange, setTimeRange }}>
+                <AppContext.Provider value={{ stockCode, stockName, setStockInfo, legendData, setLegendData, latestData, setLatestData, isAnalyzing, setIsAnalyzing, interval, setInterval }}>
                     {children}
                 </AppContext.Provider>
             );
@@ -139,7 +139,7 @@
             const volContainerRef = useRef(null);
             const rsiContainerRef = useRef(null);
 
-            const { setLegendData, timeRange } = useContext(AppContext);
+            const { setLegendData, interval } = useContext(AppContext);
 
             const chartsRef = useRef({});
             const seriesRefs = useRef({});
@@ -150,7 +150,22 @@
 
                 const cleanHistory = [...data.history]
                     .filter(item => item && item.time)
-                    .sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+                    .map(item => {
+                        let finalTime;
+                        // 💡 시간 꼬임 방지 트릭: 
+                        // 백엔드에서 받은 KST 시간에 'Z(UTC)'를 강제로 붙여서 Lightweight Charts가 시차 보정 없이 액면 그대로 띄우게 만듭니다!
+                        if (item.time.includes('T')) {
+                            finalTime = Math.floor(new Date(item.time + "Z").getTime() / 1000);
+                        } else {
+                            finalTime = item.time;
+                        }
+                        return { ...item, time: finalTime };
+                    })
+                    .sort((a, b) => {
+                        const timeA = typeof a.time === 'string' ? new Date(a.time).getTime() : a.time;
+                        const timeB = typeof b.time === 'string' ? new Date(b.time).getTime() : b.time;
+                        return timeA - timeB;
+                    });
 
                 const uniqueHistory = [];
                 const seen = new Set();
@@ -169,6 +184,11 @@
                     crosshair: { mode: CrosshairMode.Normal },
                     rightPriceScale: { visible: true, borderColor: '#2a2e39', minimumWidth: 80 },
                     leftPriceScale: { visible: false },
+                    timeScale: {
+                        timeVisible: true,
+                        secondsVisible: false,
+                        borderColor: '#2a2e39',
+                    },
                     localization: { locale: 'ko-KR', dateFormat: 'yyyy-MM-dd', priceFormatter: price => Math.floor(price).toLocaleString() },
                     autoSize: true,
                 };
@@ -176,11 +196,8 @@
                 // --- 1. 메인 차트 ---
                 const mainChart = createChart(mainContainerRef.current, {
                     ...commonOptions,
-                    timeScale: { visible: false, borderColor: '#2a2e39' },
-                    crosshair: {
-                        mode: CrosshairMode.Normal,
-                        vertLine: { labelVisible: false },
-                    }
+                    timeScale: { ...commonOptions.timeScale, visible: false },
+                    crosshair: { mode: CrosshairMode.Normal, vertLine: { labelVisible: false } }
                 });
                 chartsRef.current.main = mainChart;
                 mainChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
@@ -192,61 +209,31 @@
                 const candleData = uniqueHistory.map(item => ({ time: item.time, open: item.open, high: item.high, low: item.low, close: item.close }));
                 candlestickSeries.setData(candleData);
 
-                const markers = [];
-                uniqueHistory.forEach(item => {
-                    if (item.signal) {
-                        const isWarning = item.signal.includes('저항') || item.signal.includes('상단');
-                        markers.push({
-                            time: item.time,
-                            position: isWarning ? 'aboveBar' : 'belowBar',
-                            color: isWarning ? '#ef5350' : '#2962ff',
-                            shape: isWarning ? 'arrowDown' : 'arrowUp',
-                            text: item.signal
-                        });
-                    }
-                });
-                if (markers.length > 0) candlestickSeries.setMarkers(markers);
-
-                // ⭐ 기간 지지/저항(초록/빨강) + 당일 피봇 지지/저항(파랑/보라) 통합 세팅
                 const linesConfig = [
-                    // 기간별 (기존)
                     { id: 'sup5', price: latest.support_5, color: '#22c55e', lineWidth: 1 },
                     { id: 'res5', price: latest.resist_5, color: '#ef5350', lineWidth: 1 },
                     { id: 'sup20', price: latest.support_20, color: '#16a34a', lineWidth: 2 },
                     { id: 'res20', price: latest.resist_20, color: '#dc2626', lineWidth: 2 },
                     { id: 'sup60', price: latest.support_60, color: '#15803d', lineWidth: 3 },
                     { id: 'res60', price: latest.resist_60, color: '#b91c1c', lineWidth: 3 },
-
-                    // 피봇 포인트 (신규)
-                    { id: 'pivot', price: latest.pivot, color: '#eab308', lineWidth: 2 }, // 중심: 노랑
-                    { id: 's1', price: latest.s1, color: '#0ea5e9', lineWidth: 1 },       // 1차지지: 스카이블루
-                    { id: 's2', price: latest.s2, color: '#0284c7', lineWidth: 2 },       // 2차지지: 딥블루
-                    { id: 'r1', price: latest.r1, color: '#d946ef', lineWidth: 1 },       // 1차저항: 핑크
-                    { id: 'r2', price: latest.r2, color: '#c026d3', lineWidth: 2 },       // 2차저항: 자줏빛
+                    { id: 'pivot', price: latest.pivot, color: '#eab308', lineWidth: 2 },
+                    { id: 's1', price: latest.s1, color: '#0ea5e9', lineWidth: 1 },
+                    { id: 's2', price: latest.s2, color: '#0284c7', lineWidth: 2 },
+                    { id: 'r1', price: latest.r1, color: '#d946ef', lineWidth: 1 },
+                    { id: 'r2', price: latest.r2, color: '#c026d3', lineWidth: 2 },
                 ];
 
                 linesConfig.forEach(config => {
                     if (config.price) {
                         const line = candlestickSeries.createPriceLine({
-                            price: config.price,
-                            color: indicators[config.id] ? config.color : 'rgba(0,0,0,0)',
-                            lineWidth: config.lineWidth,
-                            lineStyle: 0,
-                            axisLabelVisible: false
+                            price: config.price, color: indicators[config.id] ? config.color : 'rgba(0,0,0,0)',
+                            lineWidth: config.lineWidth, lineStyle: 0, axisLabelVisible: false
                         });
                         srRefs.current.push({ id: config.id, line, color: config.color });
                     }
                 });
 
-                // 이평선 세팅
-                const overlayOptions = {
-                    priceScaleId: 'right',
-                    lastValueVisible: false,
-                    lineStyle: 0,
-                    autoscaleInfoProvider: () => null,
-                    crosshairMarkerVisible: false
-                };
-
+                const overlayOptions = { priceScaleId: 'right', lastValueVisible: false, lineStyle: 0, autoscaleInfoProvider: () => null, crosshairMarkerVisible: false };
                 seriesRefs.current.ma5 = mainChart.addLineSeries({ ...overlayOptions, color: '#ec4899', lineWidth: 1.5, visible: indicators.ma5, priceLineVisible: indicators.ma5 });
                 seriesRefs.current.ma5.setData(uniqueHistory.map(item => ({ time: item.time, value: item.ma5 })).filter(d => d.value !== null && d.value !== undefined));
 
@@ -259,12 +246,8 @@
                 // --- 2. 거래량 차트 ---
                 const volChart = createChart(volContainerRef.current, {
                     ...commonOptions,
-                    timeScale: { visible: false, borderColor: '#2a2e39' },
-                    crosshair: {
-                        mode: CrosshairMode.Normal,
-                        vertLine: { labelVisible: false },
-                        horzLine: { visible: false, labelVisible: false }
-                    }
+                    timeScale: { ...commonOptions.timeScale, visible: false },
+                    crosshair: { mode: CrosshairMode.Normal, vertLine: { labelVisible: false }, horzLine: { visible: false, labelVisible: false } }
                 });
                 chartsRef.current.vol = volChart;
                 const volumeSeries = volChart.addHistogramSeries({ priceScaleId: 'right' });
@@ -276,12 +259,8 @@
                 // --- 3. RSI 차트 ---
                 const rsiChart = createChart(rsiContainerRef.current, {
                     ...commonOptions,
-                    timeScale: { visible: true, borderColor: '#2a2e39', rightOffset: 5 },
-                    crosshair: {
-                        mode: CrosshairMode.Normal,
-                        vertLine: { labelVisible: true },
-                        horzLine: { visible: false, labelVisible: false }
-                    }
+                    timeScale: { ...commonOptions.timeScale, visible: true, rightOffset: 5 },
+                    crosshair: { mode: CrosshairMode.Normal, vertLine: { labelVisible: true }, horzLine: { visible: false, labelVisible: false } }
                 });
                 chartsRef.current.rsi = rsiChart;
                 const rsiSeries = rsiChart.addLineSeries({ color: '#06b6d4', lineWidth: 1.5, priceScaleId: 'right' });
@@ -289,7 +268,6 @@
                 rsiSeries.createPriceLine({ price: 70, color: '#ef5350', lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
                 rsiSeries.createPriceLine({ price: 30, color: '#2962ff', lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
 
-                // 3단 차트 동기화
                 mainChart.timeScale().subscribeVisibleLogicalRangeChange(r => { volChart.timeScale().setVisibleLogicalRange(r); rsiChart.timeScale().setVisibleLogicalRange(r); });
                 volChart.timeScale().subscribeVisibleLogicalRangeChange(r => { mainChart.timeScale().setVisibleLogicalRange(r); rsiChart.timeScale().setVisibleLogicalRange(r); });
                 rsiChart.timeScale().subscribeVisibleLogicalRangeChange(r => { mainChart.timeScale().setVisibleLogicalRange(r); volChart.timeScale().setVisibleLogicalRange(r); });
@@ -312,7 +290,6 @@
 
             useEffect(() => {
                 const r = seriesRefs.current;
-
                 r.ma5.applyOptions({ visible: indicators.ma5, priceLineVisible: indicators.ma5 });
                 r.ma20.applyOptions({ visible: indicators.ma20, priceLineVisible: indicators.ma20 });
                 r.ma60.applyOptions({ visible: indicators.ma60, priceLineVisible: indicators.ma60 });
@@ -321,22 +298,6 @@
                     item.line.applyOptions({ color: indicators[item.id] ? item.color : 'rgba(0,0,0,0)' });
                 });
             }, [indicators]);
-
-            useEffect(() => {
-                if (!chartsRef.current.main || !data) return;
-                const { history } = data;
-                let range = history.length;
-                if (timeRange === '1M') range = 20;
-                if (timeRange === '3M') range = 60;
-                if (timeRange === '1Y') range = 250;
-
-                const cleanHistory = [...history].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
-                const visibleData = cleanHistory.slice(Math.max(cleanHistory.length - range, 0));
-
-                if (visibleData.length > 0) {
-                    chartsRef.current.main.timeScale().setVisibleRange({ from: visibleData[0].time, to: visibleData[visibleData.length - 1].time });
-                }
-            }, [timeRange, data]);
 
             return (
                 <div className="w-full h-full flex flex-col relative bg-[#131722]">
@@ -353,9 +314,7 @@
 
         function ChatPanel() {
             const { setStockInfo, setLegendData, setLatestData, setIsAnalyzing } = useContext(AppContext);
-            const [messages, setMessages] = useState([
-                { type: 'ai', text: '어떤 종목을 분석해드릴까요?', isStreaming: false }
-            ]);
+            const [messages, setMessages] = useState([{ type: 'ai', text: '어떤 종목을 분석해드릴까요?', isStreaming: false }]);
             const [input, setInput] = useState('');
             const [loading, setLoading] = useState(false);
             const messagesEndRef = useRef(null);
@@ -402,10 +361,8 @@
                                             if (parsedData.type === 'metadata') {
                                                 if (parsedData.stock_code) {
                                                     setStockInfo(parsedData.stock_code, parsedData.stock_name);
-                                                    setIsAnalyzing(false);
-                                                } else {
-                                                    setIsAnalyzing(false);
                                                 }
+                                                setIsAnalyzing(false);
                                             } else if (parsedData.type === 'chunk') {
                                                 aiFullText += parsedData.content;
                                                 setMessages(prev => {
@@ -469,10 +426,9 @@
         }
 
         function App() {
-            const { stockCode, stockName, legendData, latestData, setLatestData, isAnalyzing, timeRange, setTimeRange } = useContext(AppContext);
+            const { stockCode, stockName, legendData, latestData, setLatestData, isAnalyzing, interval, setInterval } = useContext(AppContext);
             const [chartData, setChartData] = useState(null);
 
-            // ⭐ 상태 관리 (피봇 포인트 추가, 기본적으로 5일선 & 중심/1차 피봇만 켬)
             const [indicators, setIndicators] = useState({
                 ma5: true, ma20: false, ma60: false,
                 sup5: true, res5: true,
@@ -482,7 +438,6 @@
             });
 
             const toggle = (key) => setIndicators(prev => ({ ...prev, [key]: !prev[key] }));
-
             const toggleGroup = (keys) => {
                 setIndicators(prev => {
                     const allOn = keys.every(k => prev[k]);
@@ -495,7 +450,7 @@
             useEffect(() => {
                 if (!stockCode) { setChartData(null); setLatestData(null); return; }
                 setChartData(null);
-                fetch(`/api/chart_data?code=${encodeURIComponent(stockCode)}&name=${encodeURIComponent(stockName || '')}`)
+                fetch(`/api/chart_data?code=${encodeURIComponent(stockCode)}&name=${encodeURIComponent(stockName || '')}&interval=${interval}`)
                     .then(r => r.json())
                     .then(data => {
                         if (data.status === 'success') {
@@ -503,16 +458,15 @@
                             setLatestData(data.latest);
                         }
                     });
-            }, [stockCode]);
+            }, [stockCode, interval]);
 
             const isLoading = isAnalyzing || (stockCode && !chartData);
 
             return (
                 <div className="flex w-full h-[100vh] bg-[#131722] overflow-hidden text-sm">
                     <div className="flex-1 flex flex-col h-full relative border-r border-[#1e222d] min-w-0">
-                        {/* 1. 최상단 헤더 */}
-                        <div className="w-full min-h-[65px] border-b border-[#1e222d] bg-[#131722]/95 z-40 px-5 py-3 shrink-0 flex justify-between items-center">
-                            <div className="flex flex-col justify-center w-full">
+                        <div className="w-full min-h-[65px] border-b border-[#1e222d] bg-[#131722]/95 z-40 px-5 py-3 shrink-0 flex justify-between items-center overflow-x-auto">
+                            <div className="flex flex-col justify-center w-full min-w-max">
                                 {stockCode && !isLoading ? (
                                     <>
                                         <div className="flex items-center justify-between w-full">
@@ -522,20 +476,21 @@
                                                 </span>
                                             </div>
                                             <div className="flex bg-[#1e222d] rounded p-1 border border-[#2a2e39] shrink-0 ml-4">
-                                                {['1M', '3M', '1Y', '전체'].map(range => {
-                                                    const val = range === '전체' ? 'ALL' : range;
-                                                    return (
-                                                        <button
-                                                            key={val} onClick={() => setTimeRange(val)}
-                                                            className={`px-3 py-1 text-xs font-bold rounded transition-colors ${timeRange === val ? 'bg-[#2962ff] text-white' : 'text-gray-400 hover:text-white'}`}
-                                                        >
-                                                            {range}
-                                                        </button>
-                                                    );
-                                                })}
+                                                {[
+                                                    { label: '1분', val: '1m' }, { label: '3분', val: '3m' },
+                                                    { label: '5분', val: '5m' }, { label: '15분', val: '15m' },
+                                                    { label: '60분', val: '60m' }, { label: '1일', val: '1d' },
+                                                    { label: '1주', val: '1w' }, { label: '1달', val: '1M' }
+                                                ].map(btn => (
+                                                    <button
+                                                        key={btn.val} onClick={() => setInterval(btn.val)}
+                                                        className={`px-3 py-1 text-xs font-bold rounded transition-colors ${interval === btn.val ? 'bg-[#2962ff] text-white' : 'text-gray-400 hover:text-white'}`}
+                                                    >
+                                                        {btn.label}
+                                                    </button>
+                                                ))}
                                             </div>
                                         </div>
-                                        {/* ⭐ 상단 헤더 가격 정보 (피봇 포인트 포함) */}
                                         {legendData && (
                                             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-[0.75rem] font-mono">
                                                 <div className="flex gap-2">
@@ -543,28 +498,24 @@
                                                 </div>
                                                 <div className="w-px h-3 bg-[#2a2e39]"></div>
                                                 <div className="flex gap-2 font-bold">
-                                                    {indicators.ma5 && legendData.ma5 && <span className="text-[#ec4899]">5일 이평: {Math.floor(legendData.ma5).toLocaleString()}</span>}
-                                                    {indicators.ma20 && legendData.ma20 && <span className="text-[#f59e0b]">20일 이평: {Math.floor(legendData.ma20).toLocaleString()}</span>}
-                                                    {indicators.ma60 && legendData.ma60 && <span className="text-[#a855f7]">60일 이평: {Math.floor(legendData.ma60).toLocaleString()}</span>}
+                                                    {indicators.ma5 && legendData.ma5 && <span className="text-[#ec4899]">5선: {Math.floor(legendData.ma5).toLocaleString()}</span>}
+                                                    {indicators.ma20 && legendData.ma20 && <span className="text-[#f59e0b]">20선: {Math.floor(legendData.ma20).toLocaleString()}</span>}
+                                                    {indicators.ma60 && legendData.ma60 && <span className="text-[#a855f7]">60선: {Math.floor(legendData.ma60).toLocaleString()}</span>}
                                                 </div>
                                                 {latestData && (
                                                     <>
                                                         <div className="w-px h-3 bg-[#2a2e39]"></div>
                                                         <div className="flex gap-2 font-bold opacity-80">
-                                                            {indicators.sup5 && latestData.support_5 && <span className="text-[#22c55e]">5일 지지: {Math.floor(latestData.support_5).toLocaleString()}</span>}
-                                                            {indicators.res5 && latestData.resist_5 && <span className="text-[#ef5350]">5일 저항: {Math.floor(latestData.resist_5).toLocaleString()}</span>}
-                                                            {indicators.sup20 && latestData.support_20 && <span className="text-[#16a34a]">20일 지지: {Math.floor(latestData.support_20).toLocaleString()}</span>}
-                                                            {indicators.res20 && latestData.resist_20 && <span className="text-[#dc2626]">20일 저항: {Math.floor(latestData.resist_20).toLocaleString()}</span>}
-                                                            {indicators.sup60 && latestData.support_60 && <span className="text-[#15803d]">60일 지지: {Math.floor(latestData.support_60).toLocaleString()}</span>}
-                                                            {indicators.res60 && latestData.resist_60 && <span className="text-[#b91c1c]">60일 저항: {Math.floor(latestData.resist_60).toLocaleString()}</span>}
+                                                            {indicators.sup5 && latestData.support_5 && <span className="text-[#22c55e]">5선 지지: {Math.floor(latestData.support_5).toLocaleString()}</span>}
+                                                            {indicators.res5 && latestData.resist_5 && <span className="text-[#ef5350]">5선 저항: {Math.floor(latestData.resist_5).toLocaleString()}</span>}
+                                                            {indicators.sup20 && latestData.support_20 && <span className="text-[#16a34a]">20선 지지: {Math.floor(latestData.support_20).toLocaleString()}</span>}
+                                                            {indicators.res20 && latestData.resist_20 && <span className="text-[#dc2626]">20선 저항: {Math.floor(latestData.resist_20).toLocaleString()}</span>}
                                                         </div>
                                                         <div className="w-px h-3 bg-[#2a2e39]"></div>
                                                         <div className="flex gap-2 font-bold opacity-80">
                                                             {indicators.pivot && latestData.pivot && <span className="text-[#eab308]">당일 중심: {Math.floor(latestData.pivot).toLocaleString()}</span>}
                                                             {indicators.s1 && latestData.s1 && <span className="text-[#0ea5e9]">1차 지지: {Math.floor(latestData.s1).toLocaleString()}</span>}
-                                                            {indicators.s2 && latestData.s2 && <span className="text-[#0284c7]">2차 지지: {Math.floor(latestData.s2).toLocaleString()}</span>}
                                                             {indicators.r1 && latestData.r1 && <span className="text-[#d946ef]">1차 저항: {Math.floor(latestData.r1).toLocaleString()}</span>}
-                                                            {indicators.r2 && latestData.r2 && <span className="text-[#c026d3]">2차 저항: {Math.floor(latestData.r2).toLocaleString()}</span>}
                                                         </div>
                                                     </>
                                                 )}
@@ -581,28 +532,27 @@
                             </div>
                         </div>
 
-                        {/* ⭐ 2. 보조지표 툴바 (피봇 포인트 스위치 완벽 추가) */}
                         {chartData && !isLoading && (
                             <div className="w-full bg-[#181c25] border-b border-[#2a2e39] px-4 py-2 flex flex-wrap gap-x-6 gap-y-2 items-center shrink-0 z-30">
                                 <div className="flex items-center gap-2">
                                     <span onClick={() => toggleGroup(['ma5', 'ma20', 'ma60'])} className="text-gray-400 hover:text-white text-xs font-bold mr-1 cursor-pointer px-1.5 py-0.5 rounded transition-colors hover:bg-[#2a2e39]" title="전체 켜기/끄기">이평선</span>
-                                    <ToggleSwitch label="5일" color="bg-[#ec4899]" active={indicators.ma5} onClick={() => toggle('ma5')} />
-                                    <ToggleSwitch label="20일" color="bg-[#f59e0b]" active={indicators.ma20} onClick={() => toggle('ma20')} />
-                                    <ToggleSwitch label="60일" color="bg-[#a855f7]" active={indicators.ma60} onClick={() => toggle('ma60')} />
+                                    <ToggleSwitch label="5선" color="bg-[#ec4899]" active={indicators.ma5} onClick={() => toggle('ma5')} />
+                                    <ToggleSwitch label="20선" color="bg-[#f59e0b]" active={indicators.ma20} onClick={() => toggle('ma20')} />
+                                    <ToggleSwitch label="60선" color="bg-[#a855f7]" active={indicators.ma60} onClick={() => toggle('ma60')} />
                                 </div>
                                 <div className="w-px h-4 bg-[#2a2e39]"></div>
                                 <div className="flex items-center gap-2">
                                     <span onClick={() => toggleGroup(['sup5', 'sup20', 'sup60'])} className="text-[#22c55e] hover:text-white text-xs font-bold mr-1 cursor-pointer px-1.5 py-0.5 rounded transition-colors hover:bg-[#2a2e39]" title="전체 켜기/끄기">기간 지지</span>
-                                    <ToggleSwitch label="5일" color="bg-[#22c55e]" active={indicators.sup5} onClick={() => toggle('sup5')} />
-                                    <ToggleSwitch label="20일" color="bg-[#16a34a]" active={indicators.sup20} onClick={() => toggle('sup20')} />
-                                    <ToggleSwitch label="60일" color="bg-[#15803d]" active={indicators.sup60} onClick={() => toggle('sup60')} />
+                                    <ToggleSwitch label="5선" color="bg-[#22c55e]" active={indicators.sup5} onClick={() => toggle('sup5')} />
+                                    <ToggleSwitch label="20선" color="bg-[#16a34a]" active={indicators.sup20} onClick={() => toggle('sup20')} />
+                                    <ToggleSwitch label="60선" color="bg-[#15803d]" active={indicators.sup60} onClick={() => toggle('sup60')} />
                                 </div>
                                 <div className="w-px h-4 bg-[#2a2e39]"></div>
                                 <div className="flex items-center gap-2">
                                     <span onClick={() => toggleGroup(['res5', 'res20', 'res60'])} className="text-[#ef5350] hover:text-white text-xs font-bold mr-1 cursor-pointer px-1.5 py-0.5 rounded transition-colors hover:bg-[#2a2e39]" title="전체 켜기/끄기">기간 저항</span>
-                                    <ToggleSwitch label="5일" color="bg-[#ef5350]" active={indicators.res5} onClick={() => toggle('res5')} />
-                                    <ToggleSwitch label="20일" color="bg-[#dc2626]" active={indicators.res20} onClick={() => toggle('res20')} />
-                                    <ToggleSwitch label="60일" color="bg-[#b91c1c]" active={indicators.res60} onClick={() => toggle('res60')} />
+                                    <ToggleSwitch label="5선" color="bg-[#ef5350]" active={indicators.res5} onClick={() => toggle('res5')} />
+                                    <ToggleSwitch label="20선" color="bg-[#dc2626]" active={indicators.res20} onClick={() => toggle('res20')} />
+                                    <ToggleSwitch label="60선" color="bg-[#b91c1c]" active={indicators.res60} onClick={() => toggle('res60')} />
                                 </div>
                                 <div className="w-px h-4 bg-[#2a2e39]"></div>
                                 <div className="flex items-center gap-2">

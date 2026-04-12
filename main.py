@@ -23,7 +23,9 @@ from functools import lru_cache
 warnings.filterwarnings('ignore')
 load_dotenv()
 
-# 1. 초기 설정 및 클라이언트
+# ==========================================
+# 1. 초기 설정 및 클라이언트 (Supabase & OpenAI)
+# ==========================================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 client = wrap_openai(openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY")))
@@ -33,6 +35,48 @@ supabase = SyncPostgrestClient(
     headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
 )
 
+# ==========================================
+# 2. 한국투자증권 (KIS) OpenAPI 설정
+# ==========================================
+KIS_APP_KEY = os.getenv("KIS_APP_KEY")
+KIS_APP_SECRET = os.getenv("KIS_APP_SECRET")
+KIS_URL = os.getenv("KIS_URL", "https://openapivts.koreainvestment.com:29443")
+
+kis_access_token = None
+kis_token_expired_at = None
+
+def get_kis_token():
+    global kis_access_token, kis_token_expired_at
+    if kis_access_token and kis_token_expired_at and datetime.now() < kis_token_expired_at:
+        return kis_access_token
+
+    print("🔄 한국투자증권 API Access Token 발급 중...")
+    url = f"{KIS_URL}/oauth2/tokenP"
+    headers = {"content-type": "application/json"}
+    body = {
+        "grant_type": "client_credentials",
+        "appkey": KIS_APP_KEY,
+        "appsecret": KIS_APP_SECRET
+    }
+    
+    response = requests.post(url, headers=headers, json=body)
+    res_data = response.json()
+    
+    if "access_token" in res_data:
+        kis_access_token = res_data["access_token"]
+        kis_token_expired_at = datetime.now() + timedelta(hours=23)
+        print("✅ 한투증권 토큰 발급 완료!")
+        return kis_access_token
+    return None
+
+# ==========================================
+# 3. 글로벌 차트 데이터 캐시 (1분 새로고침 구현)
+# ==========================================
+CHART_CACHE = {}
+
+# ==========================================
+# 4. FastAPI 앱 초기화 및 데이터 로딩
+# ==========================================
 app = FastAPI(title="Quant Hybrid RAG Server", version="2.0")
 
 app.add_middleware(
@@ -55,53 +99,10 @@ stock_text = """
 
 [출력 포맷 강제 규정 🚨절대 엄수🚨]
 - 모든 답변은 줄글 형태를 금지하며, 가독성을 극대화하기 위해 반드시 아래 예시와 100% 동일하게 `**` 마크다운을 사용하여 작성하세요.
-
---- (답변 출력 템플릿 예시) ---
-### ■ 스토리 & 테마
-- **테마 요약:** (현재 시장의 어떤 핵심 주도 테마와 엮여 있는지 설명)
-- **시장 위치:** (이 테마가 초기인지, 확산기인지, 끝물인지 판단)
-- **모멘텀:** (종목 상승의 거시적 촉매제)
-
-### ■ 수급 & 거래량 추적
-- **거래량 상태:** (평균 대비 거래량 수치 평가)
-- **수급 해석:** (매집인지, 설거지인지 판단)
-
-### ■ 차트 셋업 판독
-- **현재 위치:** (이평선, 볼린저밴드 기준 위치)
-- **보조 지표:** (RSI, 다이버전스 특이사항)
-- **차트 패턴:** (특이 패턴 유무)
-
-### ■ 기계적 타점 및 손익비
-- **종합 판단:** (강력 매수 / 분할 매수 / 관망 후 대기매수 중 1)
-- **진입 타점:** (숫자로 대기 매수 가격 명확히 제시)
-- **목표가:** (저항선 기반 익절 가격)
-- **손절가:** (지지선 이탈 시 자를 가격)
-- **손익비 분석:** (손절폭 대비 수익폭 산출)
-------------------------
 """
 
-knowledge_text = """
-[실전 트레이딩 셋업 및 지표 해석 사전]
-1. 볼린저밴드 수축 (Squeeze) & 돌파
-- 밴드폭이 10% 이하로 좁아지면 극단적인 변동성 수축기(VCP)다. 
-- 수축기 이후 상단을 뚫으면 강력한 상승 랠리다.
-
-2. RSI 다이버전스와 공포 매매
-- 진짜 바닥은 주가는 하락해 전저점을 깼는데, RSI는 저점을 높이는 현상(상승 다이버전스)이다.
-
-3. 거래량 클라이맥스 (Volume Climax)
-- 바닥권 장대음봉에서 터진 대량 거래량은 세력의 패닉셀 매집이다.
-
-4. 60일 이평선(수급선)의 생명력
-- 60일선이 탄탄하게 우상향 중인데 20일선을 깨고 60일선까지 급락했다면 확률 높은 1차 매수 타점이다.
-"""
-
-class NewsData(BaseModel):
-    title: str; content: str; source: str; url: str
-class StockQuery(BaseModel):
-    question: str
-class IndexData(BaseModel):
-    indexName: str; price: float
+class NewsData(BaseModel): title: str; content: str; source: str; url: str
+class IndexData(BaseModel): indexName: str; price: float
 
 print("✅ KRX 종목 리스트 로딩 중...")
 krx = fdr.StockListing('KRX')
@@ -131,17 +132,134 @@ def find_stock(question: str):
     except: pass
     return None, None
 
-@lru_cache(maxsize=32)
-def fetch_stock_data(code: str):
-    if code.startswith("US:"):
-        df = yf.download(code.replace("US:", ""), period="6mo", progress=False)
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
-        return df, "달러"
-    return fdr.DataReader(code).tail(200), "원"
+# ==========================================
+# 5. 핵심 로직: YFinance 과거데이터 + KIS 최신데이터 완벽 병합엔진
+# ==========================================
+def fetch_merged_chart_data(code: str, interval: str):
+    is_us = code.startswith("US:")
+    ticker = code.replace("US:", "") if is_us else code
+    is_intraday = interval.endswith('m')
+    
+    # 💡 1단계: 주봉/월봉이라도 일단 '일봉(1d)'으로 통일해서 YF 과거데이터를 긁어옵니다.
+    yf_int_map = {'1m':'1m', '3m':'1m', '5m':'5m', '15m':'15m', '60m':'60m', '1d':'1d', '1w':'1d', '1M':'1d'}
+    yf_per_map = {'1m':'7d', '3m':'7d', '5m':'60d', '15m':'60d', '60m':'730d', '1d':'2y', '1w':'5y', '1M':'10y'}
+    
+    yf_int = yf_int_map.get(interval, '1d')
+    yf_per = yf_per_map.get(interval, '2y')
+    
+    yf_ticker = ticker
+    if not is_us:
+        try:
+            market = krx.loc[krx['Code'] == ticker, 'Market'].values[0]
+            yf_ticker = f"{ticker}.KS" if 'KOSPI' in str(market) else f"{ticker}.KQ"
+        except:
+            yf_ticker = f"{ticker}.KS"
+            
+    df_yf = pd.DataFrame()
+    try:
+        df_yf = yf.download(yf_ticker, period=yf_per, interval=yf_int, prepost=True, progress=False)
+        if not df_yf.empty:
+            if isinstance(df_yf.columns, pd.MultiIndex): 
+                df_yf.columns = df_yf.columns.droplevel(1)
+            # 타임존 제거하여 한국 시간과 완전히 일치시킵니다.
+            if getattr(df_yf.index, 'tz', None) is not None:
+                df_yf.index = df_yf.index.tz_convert('Asia/Seoul').tz_localize(None)
+    except Exception as e:
+        print("YFinance Fetch Error:", e)
+
+    # 💡 2단계: 한투 API로 실시간 최신 틱 가져오기 (지연 방지용)
+    df_kis = pd.DataFrame()
+    token = get_kis_token()
+    if token and not is_us:
+        try:
+            if not is_intraday:
+                # 주/월봉이라도 무조건 일봉으로 가져옵니다 (중복 방지)
+                url = f"{KIS_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+                headers = { "content-type": "application/json", "authorization": f"Bearer {token}", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET, "tr_id": "FHKST03010100", "custtype": "P" }
+                params = { "FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker, "FID_INPUT_DATE_1": "", "FID_INPUT_DATE_2": "", "FID_PERIOD_DIV_CODE": "D", "FID_ORG_ADJ_PRC": "1" }
+                res = requests.get(url, headers=headers, params=params).json()
+                if res.get('rt_cd') == '0' and res.get('output2'):
+                    df_kis = pd.DataFrame(res['output2'])
+                    df_kis = df_kis[['stck_bsop_date', 'stck_oprc', 'stck_hgpr', 'stck_lwpr', 'stck_clpr', 'acml_vol']]
+                    df_kis.columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
+                    df_kis['Datetime'] = pd.to_datetime(df_kis['Date'], format='%Y%m%d')
+                    df_kis.set_index('Datetime', inplace=True)
+                    df_kis.drop(['Date'], axis=1, inplace=True)
+            else:
+                # 분봉은 1분봉 최신 틱을 가져와서 20분 지연을 메꿉니다.
+                url = f"{KIS_URL}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+                headers = { "content-type": "application/json", "authorization": f"Bearer {token}", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET, "tr_id": "FHKST03010200", "custtype": "P" }
+                params = { "FID_ETC_CLS_CODE": "", "FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker, "FID_INPUT_HOUR_1": "153000", "FID_PW_DATA_INCU_YN": "N" }
+                res = requests.get(url, headers=headers, params=params).json()
+                if res.get('rt_cd') == '0' and res.get('output2'):
+                    df_kis = pd.DataFrame(res['output2'])
+                    df_kis = df_kis[['stck_bsop_date', 'stck_cntg_hour', 'stck_oprc', 'stck_hgpr', 'stck_lwpr', 'stck_prpr', 'cntg_vol']]
+                    df_kis.columns = ['Date', 'Time', 'Open', 'High', 'Low', 'Close', 'Volume']
+                    df_kis['Datetime'] = pd.to_datetime(df_kis['Date'] + df_kis['Time'], format='%Y%m%d%H%M%S')
+                    df_kis.set_index('Datetime', inplace=True)
+                    df_kis.drop(['Date', 'Time'], axis=1, inplace=True)
+                    
+            if not df_kis.empty:
+                df_kis = df_kis.astype(float).sort_index()
+        except Exception as e:
+            print("KIS Patch Error:", e)
+
+    # 💡 3단계: 과거(YF)와 현재(KIS) 데이터 완벽 병합 (Concat)
+    if not df_yf.empty and not df_kis.empty:
+        df = pd.concat([df_yf, df_kis])
+        # 중복되는 시간이 있다면 KIS(실시간) 최신 데이터를 우선 보존합니다.
+        df = df[~df.index.duplicated(keep='last')].sort_index()
+    elif not df_yf.empty:
+        df = df_yf
+    elif not df_kis.empty:
+        df = df_kis
+    else:
+        df = pd.DataFrame()
+
+    # (최후의 안전망)
+    if df.empty and not is_intraday:
+        df = fdr.DataReader(ticker).tail(500)
+
+    # 💡 4단계: 찌꺼기 방지를 위한 최종 마스터 리샘플링! (여기서 1분/일봉 데이터를 요구사항에 맞춰 묶습니다)
+    if not df.empty:
+        if is_intraday:
+            # Pandas 최신 문법(T -> min)으로 에러 방지
+            rule = interval.replace('m', 'min')
+            df = df.resample(rule, label='left', closed='left').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+        else:
+            if interval == '1w':
+                # 금요일 기준으로 한 주 묶기
+                df = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+            elif interval == '1M':
+                # 월말 기준으로 한 달 묶기
+                df = df.resample('ME').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+
+    return df, "달러" if is_us else "원"
+
+def get_data_with_ttl_cache(code: str, interval: str):
+    """1분 단위로 캐싱(새로고침) 하는 함수"""
+    global CHART_CACHE
+    now = time.time()
+    cache_key = f"{code}_{interval}"
+    
+    # 캐시가 있고 60초가 지나지 않았다면 API 통신 없이 0.01초 만에 메모리 반환
+    if cache_key in CHART_CACHE:
+        cached_df, timestamp = CHART_CACHE[cache_key]
+        if now - timestamp < 60:
+            print(f"⚡ [{cache_key}] 메모리 캐시 사용 (남은 수명: {int(60 - (now - timestamp))}초)")
+            return cached_df.copy(), "달러" if code.startswith("US:") else "원"
+            
+    print(f"🌐 [{cache_key}] 60초 경과. API 새로 호출 및 캐시 갱신 중...")
+    df, unit = fetch_merged_chart_data(code, interval)
+    
+    if not df.empty:
+        CHART_CACHE[cache_key] = (df, now)
+    
+    return df, unit
 
 def get_technical_analysis(name: str, code: str) -> str:
     try:
-        df, unit = fetch_stock_data(code)
+        df, unit = get_data_with_ttl_cache(code, "1d") 
         if df.empty or len(df) < 60: return f"[{name} 데이터 부족]"
         
         close = df['Close']
@@ -162,10 +280,13 @@ def get_technical_analysis(name: str, code: str) -> str:
         loss = (-delta.clip(upper=0)).rolling(14).mean()
         rsi = float((100 - 100 / (1 + gain / loss)).iloc[-1])
         
-        return (f"[{name} 기술적 지표]\n- 현재가: {price:,}{unit}\n- 20일선: {ma20:,} / 60일선: {ma60:,}\n"
+        return (f"[{name} 일봉 기준 기술적 지표]\n- 현재가: {price:,}{unit}\n- 20선: {ma20:,} / 60선: {ma60:,}\n"
                 f"- RSI: {rsi:.1f}\n- 볼린저 밴드폭: {bb_width}%\n- 거래량: {vol_ratio}배 터짐\n")
     except Exception as e: return f"분석 실패: {e}"
 
+# ==========================================
+# 6. FastAPI 엔드포인트
+# ==========================================
 @app.post("/collect")
 def collect_news(data: NewsData):
     try:
@@ -175,11 +296,7 @@ def collect_news(data: NewsData):
     except Exception as e: return {"status": "error", "message": str(e)}
 
 @app.post("/collect_index")
-def collect_index(data: IndexData):
-    try:
-        # supabase.table("index_data").insert({"index_name": data.indexName, "price": data.price, "updated_at": datetime.now().isoformat()}).execute()
-        return {"status": "success"}
-    except Exception as e: return {"status": "error"}
+def collect_index(data: IndexData): return {"status": "success"}
 
 @app.get("/fetch_naver_news")
 def fetch_naver_news(query: str = "증시"):
@@ -231,10 +348,10 @@ async def ask_ai(question: str):
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/chart_data")
-def get_chart_data(code: str, name: str = ""):
+def get_chart_data(code: str, name: str = "", interval: str = "1d"):
     try:
-        df, _ = fetch_stock_data(code)
-        if df.empty or len(df) < 20: return {"status": "error", "message": "데이터 부족"}
+        df, _ = get_data_with_ttl_cache(code, interval)
+        if df.empty or len(df) < 2: return {"status": "error", "message": "데이터 부족"}
 
         df = df.copy()
         df['ma5'] = df['Close'].rolling(5).mean()
@@ -250,7 +367,6 @@ def get_chart_data(code: str, name: str = ""):
         loss = (-delta.clip(upper=0)).rolling(14).mean()
         df['rsi'] = 100 - 100 / (1 + gain / loss)
 
-        # ⭐ 5일, 20일, 60일 다중 지지/저항선 추출
         support_5 = float(df['Low'].rolling(5).min().iloc[-1])
         resist_5 = float(df['High'].rolling(5).max().iloc[-1])
         support_20 = float(df['Low'].rolling(20).min().iloc[-1])
@@ -270,13 +386,15 @@ def get_chart_data(code: str, name: str = ""):
         else:
             pivot = r1 = s1 = r2 = s2 = None
 
-        df = df.dropna(subset=['ma20']).tail(400)
+        df = df.dropna(subset=['ma20'])
 
         res = []
+        is_intraday = interval.endswith('m')
         for idx, row in df.iterrows():
             price = float(row['Close'])
             res.append({
-                "time": str(idx.date()) if hasattr(idx, 'date') else str(idx).split('T')[0],
+                # 프론트엔드의 완벽한 처리를 위해, 분봉은 시간까지, 일봉은 날짜만 던집니다.
+                "time": idx.isoformat() if is_intraday else idx.strftime('%Y-%m-%d'), 
                 "open": float(row['Open']) if 'Open' in row else price, "high": float(row['High']) if 'High' in row else price,
                 "low": float(row['Low']) if 'Low' in row else price, "close": price,
                 "ma5": float(row['ma5']) if not pd.isna(row['ma5']) else None, "ma20": float(row['ma20']) if not pd.isna(row['ma20']) else None,
