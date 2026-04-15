@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quant Hybrid RAG AI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = { theme: { extend: { colors: { background: '#131722', panel: '#1e222d', accent: '#2962ff', border: '#2a2e39' } } } }
+        marked.setOptions({ breaks: true, gfm: true });
+    </script>
+    <style>
+        body {
+            font-family: 'Pretendard', sans-serif;
+            background-color: #131722;
+            color: #d1d4dc;
+            overflow: hidden;
+            margin: 0;
+            padding: 0;
+        }
+
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background-color: #2a2e39;
+            border-radius: 3px;
+        }
+
+        .markdown-body h3 {
+            font-size: 1.05rem;
+            font-weight: 700;
+            margin-top: 1.5rem;
+            margin-bottom: 0.6rem;
+            border-bottom: 1px solid #2a2e39;
+            padding-bottom: 0.3rem;
+            color: #fff;
+        }
+
+        .markdown-body h3:first-child {
+            margin-top: 0;
+        }
+
+        .markdown-body ul {
+            padding-left: 0;
+            margin-bottom: 1rem;
+            list-style: none;
+        }
+
+        .markdown-body li {
+            margin-bottom: 0.6rem;
+            position: relative;
+            padding-left: 1.2rem;
+            line-height: 1.6;
+            color: #d1d4dc;
+        }
+
+        .markdown-body li::before {
+            content: '•';
+            color: #2962ff;
+            position: absolute;
+            left: 0;
+            font-weight: bold;
+        }
+
+        .markdown-body strong {
+            color: #60a5fa;
+            font-weight: 600;
+            margin-right: 0.3rem;
+        }
+
+        .markdown-body p {
+            margin-bottom: 0.8rem;
+            line-height: 1.6;
+        }
+
+        .streaming-cursor::after {
+            content: ' ▌';
+            animation: blink 1s step-start infinite;
+            color: #2962ff;
+        }
+
+        @keyframes blink {
+            50% {
+                opacity: 0;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, createContext, useContext } = React;
+        const { createChart, CrosshairMode } = window.LightweightCharts;
+
+        const AppContext = createContext();
+
+        function AppProvider({ children }) {
+            const [stockCode, setStockCode] = useState(null);
+            const [stockName, setStockName] = useState(null);
+            const [legendData, setLegendData] = useState(null);
+            const [latestData, setLatestData] = useState(null);
+            const [isAnalyzing, setIsAnalyzing] = useState(false);
+            const [interval, setInterval] = useState('1d');
+            const [analysisQuery, setAnalysisQuery] = useState(null);
+            const [chartSignal, setChartSignal] = useState(null);
+
+            const [showRanking, setShowRanking] = useState(true);
+            const [showChat, setShowChat] = useState(true);
+            const [sentiment, setSentiment] = useState(null);
+
+            const setStockInfo = (code, name) => { setStockCode(code); setStockName(name); };
+
+            return (
+                <AppContext.Provider value={{
+                    stockCode, stockName, setStockInfo,
+                    legendData, setLegendData,
+                    latestData, setLatestData,
+                    isAnalyzing, setIsAnalyzing,
+                    interval, setInterval,
+                    analysisQuery, setAnalysisQuery,
+                    chartSignal, setChartSignal,
+                    showRanking, setShowRanking,
+                    showChat, setShowChat,
+                    sentiment, setSentiment
+                }}>
+                    {children}
+                </AppContext.Provider>
+            );
+        }
+
+        const ToggleSwitch = ({ label, active, color, onClick }) => (
+            <div onClick={onClick} className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded cursor-pointer transition-colors border select-none ${active ? 'border-gray-500 bg-[#2a2e39]' : 'border-transparent opacity-50 hover:bg-[#2a2e39]'}`}>
+                <div className={`w-6 h-3.5 rounded-full relative transition-colors ${active ? color : 'bg-gray-600'}`}>
+                    <div className={`absolute top-[2px] w-2.5 h-2.5 rounded-full bg-white transition-all ${active ? 'left-[12px]' : 'left-[2px]'}`}></div>
+                </div>
+                <span className={`text-[0.7rem] font-bold tracking-wide ${active ? 'text-white' : 'text-gray-400'}`}>{label}</span>
+            </div>
+        );
+
+        function TVChart({ data, indicators }) {
+            const mainContainerRef = useRef(null);
+            const volContainerRef = useRef(null);
+            const rsiContainerRef = useRef(null);
+
+            const { setLegendData, interval, stockCode, setChartSignal } = useContext(AppContext);
+
+            const chartsRef = useRef({});
+            const seriesRefs = useRef({});
+            const srRefs = useRef([]);
+
+            const isUS = stockCode && stockCode.startsWith("US:");
+
+            useEffect(() => {
+                if (!data || !mainContainerRef.current || !volContainerRef.current || !rsiContainerRef.current) return;
+
+                srRefs.current = [];
+                seriesRefs.current = {};
+
+                const cleanHistory = [...data.history]
+                    .filter(item => item && item.time)
+                    .map(item => {
+                        let finalTime;
+                        if (typeof item.time === 'string' && item.time.includes('T')) {
+                            finalTime = Math.floor(new Date(item.time + "Z").getTime() / 1000);
+                        } else {
+                            finalTime = item.time;
+                        }
+                        return { ...item, time: finalTime };
+                    })
+                    .sort((a, b) => a.time - b.time);
+
+                const uniqueHistory = [];
+                const seen = new Set();
+                cleanHistory.forEach(item => {
+                    if (!seen.has(item.time)) {
+                        seen.add(item.time);
+                        uniqueHistory.push(item);
+                    }
+                });
+
+                const latest = data.latest;
+
+                const commonOptions = {
+                    layout: { background: { type: 'solid', color: '#131722' }, textColor: '#8b95a1', fontSize: 11 },
+                    grid: { vertLines: { color: 'rgba(255,255,255,0.03)' }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
+                    crosshair: { 
+                        mode: CrosshairMode.Normal,
+                        vertLine: { color: 'rgba(117, 134, 150, 0.8)', width: 1.5, style: 2, labelVisible: false },
+                        horzLine: { color: 'rgba(117, 134, 150, 0.8)', width: 1.5, style: 2, labelVisible: true }
+                    },
+                    rightPriceScale: { visible: true, borderColor: '#2a2e39', minimumWidth: 80 },
+                    leftPriceScale: { visible: false },
+                    timeScale: {
+                        timeVisible: true,
+                        secondsVisible: false,
+                        borderColor: '#2a2e39',
+                    },
+                    localization: {
+                        locale: 'ko-KR',
+                        dateFormat: 'yyyy-MM-dd',
+                        priceFormatter: price => isUS ? price.toFixed(2) : Math.floor(price).toLocaleString()
+                    },
+                    autoSize: true,
+                };
+
+                // --- 메인 차트 ---
+                const mainChart = createChart(mainContainerRef.current, {
+                    ...commonOptions,
+                    timeScale: { ...commonOptions.timeScale, visible: false },
+                });
+                chartsRef.current.main = mainChart;
+                mainChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
+
+                const candlestickSeries = mainChart.addCandlestickSeries({
+                    priceScaleId: 'right',
+                    upColor: '#ef5350', downColor: '#2962ff', borderVisible: false, wickUpColor: '#ef5350', wickDownColor: '#2962ff',
+                });
+                candlestickSeries.setData(uniqueHistory);
+
+                const markers = [];
+                uniqueHistory.forEach((candle, i) => {
+                    if (candle.rsi > 75) markers.push({ time: candle.time, position: 'aboveBar', color: '#ef5350', shape: 'arrowDown' });
+                    else if (candle.rsi < 35) markers.push({ time: candle.time, position: 'belowBar', color: '#22c55e', shape: 'arrowUp' });
+                });
+                candlestickSeries.setMarkers(markers);
+
+                const overlayOptions = { priceScaleId: 'right', lastValueVisible: false, lineStyle: 0, autoscaleInfoProvider: () => null, crosshairMarkerVisible: false };
+
+                seriesRefs.current.ma5 = mainChart.addLineSeries({ ...overlayOptions, color: '#ec4899', lineWidth: 1.5, visible: indicators.ma5 });
+                seriesRefs.current.ma5.setData(uniqueHistory.map(item => ({ time: item.time, value: item.ma5 })).filter(d => d.value !== undefined));
+
+                seriesRefs.current.ma20 = mainChart.addLineSeries({ ...overlayOptions, color: '#f59e0b', lineWidth: 1.5, visible: indicators.ma20 });
+                seriesRefs.current.ma20.setData(uniqueHistory.map(item => ({ time: item.time, value: item.ma20 })).filter(d => d.value !== undefined));
+
+                seriesRefs.current.ma60 = mainChart.addLineSeries({ ...overlayOptions, color: '#a855f7', lineWidth: 1.5, visible: indicators.ma60 });
+                seriesRefs.current.ma60.setData(uniqueHistory.map(item => ({ time: item.time, value: item.ma60 })).filter(d => d.value !== undefined));
+
+                seriesRefs.current.bb_upper = mainChart.addLineSeries({ ...overlayOptions, color: 'rgba(156, 163, 175, 0.3)', lineWidth: 1, visible: indicators.bb });
+                seriesRefs.current.bb_upper.setData(uniqueHistory.map(item => ({ time: item.time, value: item.bb_upper })).filter(d => d.value !== undefined));
+
+                seriesRefs.current.bb_lower = mainChart.addLineSeries({ ...overlayOptions, color: 'rgba(156, 163, 175, 0.3)', lineWidth: 1, visible: indicators.bb });
+                seriesRefs.current.bb_lower.setData(uniqueHistory.map(item => ({ time: item.time, value: item.bb_lower })).filter(d => d.value !== undefined));
+
+                const linesConfig = [
+                    { stateKey: 'sr5', price: latest.support_5, color: '#22c55e', lineWidth: 1 },
+                    { stateKey: 'sr5', price: latest.resist_5, color: '#22c55e', lineWidth: 1 },
+                    { stateKey: 'sr20', price: latest.support_20, color: '#16a34a', lineWidth: 2 },
+                    { stateKey: 'sr20', price: latest.resist_20, color: '#16a34a', lineWidth: 2 },
+                    { stateKey: 'sr60', price: latest.support_60, color: '#15803d', lineWidth: 3 },
+                    { stateKey: 'sr60', price: latest.resist_60, color: '#15803d', lineWidth: 3 },
+                    { stateKey: 'pivot', price: latest.pivot, color: '#eab308', lineWidth: 2 },
+                    { stateKey: 'srDyn', price: latest.support_dyn, color: '#10b981', lineWidth: 2 },
+                    { stateKey: 'srDyn', price: latest.resist_dyn, color: '#ef4444', lineWidth: 2 },
+                    { stateKey: 'sr1', price: latest.s1, color: '#d946ef', lineWidth: 1 },
+                    { stateKey: 'sr1', price: latest.r1, color: '#d946ef', lineWidth: 1 },
+                    { stateKey: 'sr2', price: latest.s2, color: '#c026d3', lineWidth: 2 },
+                    { stateKey: 'sr2', price: latest.r2, color: '#c026d3', lineWidth: 2 },
+                ];
+
+                linesConfig.forEach(config => {
+                    if (config.price) {
+                        const line = candlestickSeries.createPriceLine({
+                            price: config.price, color: indicators[config.stateKey] ? config.color : 'rgba(0,0,0,0)',
+                            lineWidth: config.lineWidth, lineStyle: 0, axisLabelVisible: false
+                        });
+                        srRefs.current.push({ stateKey: config.stateKey, line, color: config.color });
+                    }
+                });
+
+                // --- 거래량 차트 ---
+                const volChart = createChart(volContainerRef.current, {
+                    ...commonOptions,
+                    timeScale: { ...commonOptions.timeScale, visible: false },
+                    crosshair: { mode: CrosshairMode.Normal, vertLine: { labelVisible: false }, horzLine: { visible: false, labelVisible: false } }
+                });
+                chartsRef.current.vol = volChart;
+                const volumeSeries = volChart.addHistogramSeries({ priceScaleId: 'right' });
+                volumeSeries.setData(uniqueHistory.map((item, idx) => {
+                    const prevClose = idx > 0 ? uniqueHistory[idx - 1].close : item.open;
+                    return { time: item.time, value: item.volume, color: item.close >= prevClose ? 'rgba(239, 83, 80, 0.4)' : 'rgba(41, 98, 255, 0.4)' };
+                }));
+
+                // --- RSI 차트 ---
+                const rsiChart = createChart(rsiContainerRef.current, {
+                    ...commonOptions,
+                    timeScale: { ...commonOptions.timeScale, visible: true, rightOffset: 5 },
+                    crosshair: { 
+                        ...commonOptions.crosshair,
+                        vertLine: { ...commonOptions.crosshair.vertLine, labelVisible: true },
+                    }
+                });
+                chartsRef.current.rsi = rsiChart;
+                const rsiSeries = rsiChart.addLineSeries({ color: '#06b6d4', lineWidth: 1.5, priceScaleId: 'right' });
+                rsiSeries.setData(uniqueHistory.map(item => ({ time: item.time, value: item.rsi })).filter(d => d.value !== undefined));
+                rsiSeries.createPriceLine({ price: 70, color: '#ef5350', lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
+                rsiSeries.createPriceLine({ price: 30, color: '#2962ff', lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
+
+                let activeChart = null;
+                const syncCrosshair = (sourceChart, param) => {
+                    const chartsData = [
+                        { chart: mainChart, series: candlestickSeries },
+                        { chart: volChart, series: volumeSeries },
+                        { chart: rsiChart, series: rsiSeries }
+                    ];
+
+                    const isNatural = !!param.point;
+                    if (isNatural && activeChart !== sourceChart) {
+                        activeChart = sourceChart;
+                        chartsData.forEach(({ chart }) => {
+                            chart.applyOptions({ 
+                                crosshair: { 
+                                    horzLine: { 
+                                        visible: chart === sourceChart, 
+                                        labelVisible: chart === sourceChart 
+                                    } 
+                                } 
+                            });
+                        });
+                    }
+
+                    chartsData.forEach(({ chart, series }) => {
+                        if (chart !== sourceChart) {
+                            if (param.time) {
+                                chart.setCrosshairPosition(0, param.time, series);
+                            } else {
+                                chart.clearCrosshairPosition();
+                            }
+                        }
+                    });
+                };
+
+                mainChart.subscribeCrosshairMove(param => {
+                    syncCrosshair(mainChart, param);
+                    if (param.time) {
+                        const candle = uniqueHistory.find(h => h.time === param.time);
+                        if (candle) {
+                            setLegendData(candle);
+                            if (candle.rsi > 75) setChartSignal({ text: "단기 고점 (매도주의)", color: "bg-red-500" });
+                            else if (candle.rsi < 35) setChartSignal({ text: "단기 저점 (매수찬스)", color: "bg-green-500" });
+                            else if (candle.rsi > 70) setChartSignal({ text: "과열 구간", color: "bg-orange-500" });
+                            else if (candle.close > candle.ma20 * 0.99 && candle.close < candle.ma20 * 1.01) setChartSignal({ text: "20선 지지 테스트", color: "bg-blue-500" });
+                            else setChartSignal({ text: "추세 유지 중", color: "bg-gray-600" });
+                        }
+                    } else {
+                        const last = uniqueHistory[uniqueHistory.length - 1];
+                        setLegendData(last);
+                        if (last.rsi > 70) setChartSignal({ text: "고점 도달", color: "bg-red-500" });
+                        else setChartSignal({ text: "추세 관망", color: "bg-gray-600" });
+                    }
+                });
+
+                volChart.subscribeCrosshairMove(param => {
+                    syncCrosshair(volChart, param);
+                });
+
+                rsiChart.subscribeCrosshairMove(param => {
+                    syncCrosshair(rsiChart, param);
+                });
+
+                // 마우스가 차트 영역을 완전히 벗어날 때 십자선 제거 및 헤더 초기화
+                const handleMouseLeave = () => {
+                    activeChart = null;
+                    [mainChart, volChart, rsiChart].forEach(c => {
+                        c.clearCrosshairPosition();
+                        c.applyOptions({ crosshair: { horzLine: { visible: true, labelVisible: true } } });
+                    });
+                    const last = uniqueHistory[uniqueHistory.length - 1];
+                    setLegendData(last);
+                };
+
+                mainContainerRef.current.addEventListener('mouseleave', handleMouseLeave);
+                volContainerRef.current.addEventListener('mouseleave', handleMouseLeave);
+                rsiContainerRef.current.addEventListener('mouseleave', handleMouseLeave);
+
+                mainChart.timeScale().subscribeVisibleLogicalRangeChange(r => { volChart.timeScale().setVisibleLogicalRange(r); rsiChart.timeScale().setVisibleLogicalRange(r); });
+                volChart.timeScale().subscribeVisibleLogicalRangeChange(r => { mainChart.timeScale().setVisibleLogicalRange(r); rsiChart.timeScale().setVisibleLogicalRange(r); });
+                rsiChart.timeScale().subscribeVisibleLogicalRangeChange(r => { mainChart.timeScale().setVisibleLogicalRange(r); volChart.timeScale().setVisibleLogicalRange(r); });
+
+                return () => { mainChart.remove(); volChart.remove(); rsiChart.remove(); };
+            }, [data]);
+
+            useEffect(() => {
+                const s = seriesRefs.current || {};
+                if (s.ma5) s.ma5.applyOptions({ visible: !!indicators.ma5 });
+                if (s.ma20) s.ma20.applyOptions({ visible: !!indicators.ma20 });
+                if (s.ma60) s.ma60.applyOptions({ visible: !!indicators.ma60 });
+
+                const bbVisible = !!indicators.bb;
+                if (s.bb_upper) s.bb_upper.applyOptions({ visible: bbVisible });
+                if (s.bb_lower) s.bb_lower.applyOptions({ visible: bbVisible });
+
+                if (Array.isArray(srRefs.current)) {
+                    srRefs.current.forEach(({ stateKey, line, color }) => {
+                        try {
+                            const on = !!indicators[stateKey];
+                            line.applyOptions({ color: on ? color : 'rgba(0,0,0,0)' });
+                        } catch (e) { }
+                    });
+                }
+            }, [indicators]);
+
+            return (
+                <div className="w-full h-full flex flex-col relative bg-[#131722]">
+                    <div ref={mainContainerRef} className="flex-[6.5] w-full relative"></div>
+                    <div ref={volContainerRef} className="flex-[1.5] w-full relative border-t border-[#2a2e39]">
+                        <div className="absolute top-1 left-2 z-10 text-gray-500 text-xs font-bold pointer-events-none">거래량</div>
+                    </div>
+                    <div ref={rsiContainerRef} className="flex-[2.0] w-full relative border-t border-[#2a2e39]">
+                        <div className="absolute top-1 left-2 z-10 text-[#06b6d4] text-xs font-bold pointer-events-none">RSI (14)</div>
+                    </div>
+                </div>
+            );
+        }
+
+        function RankingPanel() {
+            const { setStockInfo, setIsAnalyzing, setAnalysisQuery } = useContext(AppContext);
+            const [rankedStocks, setRankedStocks] = useState([]);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                fetch('/api/ranked_stocks').then(res => res.json()).then(data => {
+                    if (data.status === 'success') { setRankedStocks(data.data); }
+                    setLoading(false);
+                }).catch(err => { console.error(err); setLoading(false); });
+            }, []);
+
+            const handleStockClick = (stock) => {
+                setIsAnalyzing(true);
+                setStockInfo(stock.code, stock.name);
+                setAnalysisQuery(`${stock.name}(${stock.code}) 종목 분석해줘. 현재 차트 신호랑 매수 타점 알려줘.`);
+                setTimeout(() => setIsAnalyzing(false), 300);
+            };
+
+            return (
+                <div className="w-[320px] h-full bg-[#1e222d] border-r border-[#2a2e39] flex flex-col shrink-0 text-sm">
+                    <div className="p-4 border-b border-[#2a2e39] bg-[#131722]/50 shrink-0">
+                        <h2 className="font-bold text-white flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full bg-[#ef5350] animate-pulse"></span> 실시간 AI 픽
+                        </h2>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-3 space-y-3">
+                        {loading ? (
+                            <div className="text-gray-500 text-center mt-10 animate-pulse">분석 중...</div>
+                        ) : rankedStocks.length > 0 ? (
+                            rankedStocks.map((stock, i) => (
+                                <div key={i} onClick={() => handleStockClick(stock)}
+                                    className="p-4 bg-[#2a2e39] rounded-lg cursor-pointer hover:bg-[#363c4e] transition-colors border border-transparent hover:border-[#2962ff]">
+                                    <div className="flex justify-between items-center mb-2">
+                                        <span className="text-white font-bold text-base">{i + 1}. {stock.name}</span>
+                                        <span className="text-[#22c55e] font-bold">{stock.score}점</span>
+                                    </div>
+                                    <p className="text-gray-400 text-xs mb-3 line-clamp-2 leading-relaxed">{stock.reason}</p>
+                                    <div className="flex justify-between text-xs font-mono">
+                                        <span className="text-[#ef5350]">목표: {stock.target_price.toLocaleString()}</span>
+                                        <span className="text-[#2962ff]">손절: {stock.stop_loss.toLocaleString()}</span>
+                                    </div>
+                                </div>
+                            ))
+                        ) : (
+                            <div className="text-gray-500 text-center mt-10">데이터가 없습니다.</div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        function ChatPanel() {
+            const { setStockInfo, analysisQuery, setAnalysisQuery } = useContext(AppContext);
+            const [messages, setMessages] = useState([{ type: 'ai', text: '어떤 종목을 분석해드릴까요?', isStreaming: false }]);
+            const [input, setInput] = useState('');
+            const [loading, setLoading] = useState(false);
+            const messagesEndRef = useRef(null);
+
+            useEffect(() => {
+                if (analysisQuery) {
+                    handleSend(analysisQuery);
+                    setAnalysisQuery(null);
+                }
+            }, [analysisQuery]);
+
+            const handleSend = async (forcedQuery) => {
+                const queryText = (typeof forcedQuery === 'string') ? forcedQuery : input.trim();
+                if (!queryText || loading) return;
+
+                setLoading(true);
+                setMessages(prev => [...prev, { type: 'user', text: queryText }, { type: 'ai', text: '', isStreaming: true }]);
+                setInput('');
+
+                try {
+                    const res = await fetch(`/ask_ai?question=${encodeURIComponent(queryText)}`);
+                    const reader = res.body.getReader();
+                    const decoder = new TextDecoder("utf-8");
+                    let aiFullText = "";
+                    let buffer = "";
+
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        buffer += decoder.decode(value, { stream: true });
+                        const parts = buffer.split('\n\n');
+                        buffer = parts.pop();
+
+                        for (const part of parts) {
+                            if (part.startsWith('data: ')) {
+                                try {
+                                    const parsedData = JSON.parse(part.replace('data: ', ''));
+                                    if (parsedData.type === 'metadata' && parsedData.stock_code) {
+                                        setStockInfo(parsedData.stock_code, parsedData.stock_name);
+                                    } else if (parsedData.type === 'chunk') {
+                                        aiFullText += parsedData.content;
+                                        setMessages(prev => {
+                                            const newMsgs = [...prev];
+                                            newMsgs[newMsgs.length - 1] = { type: 'ai', text: aiFullText, isStreaming: true };
+                                            return newMsgs;
+                                        });
+                                    }
+                                } catch (e) { }
+                            }
+                        }
+                    }
+                } catch (err) {
+                    setMessages(prev => [...prev, { type: 'ai', text: '오류가 발생했습니다.' }]);
+                } finally {
+                    setLoading(false);
+                    setMessages(prev => {
+                        const newMsgs = [...prev];
+                        if (newMsgs[newMsgs.length - 1]) newMsgs[newMsgs.length - 1].isStreaming = false;
+                        return newMsgs;
+                    });
+                }
+            };
+
+            useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+            return (
+                <div className="flex flex-col h-full bg-[#1e222d] border-l border-[#2a2e39] text-sm w-[450px]">
+                    <div className="p-4 border-b border-[#2a2e39] bg-[#131722]/50 font-bold text-white flex items-center shrink-0">
+                        <span className="w-2 h-2 rounded-full bg-[#2962ff] mr-2"></span> AI 분석 리포트
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-5 space-y-5">
+                        {messages.map((msg, i) => (
+                            <div key={i} className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}>
+                                <div className={`max-w-[90%] rounded-xl px-4 py-3 ${msg.type === 'user' ? 'bg-[#2962ff] text-white rounded-br-sm' : 'bg-[#2a2e39] text-gray-200 rounded-tl-sm shadow-lg'}`}>
+                                    <div className={`markdown-body ${msg.isStreaming ? 'streaming-cursor' : ''}`} dangerouslySetInnerHTML={{ __html: marked.parse(msg.text) }} />
+                                </div>
+                            </div>
+                        ))}
+                        <div ref={messagesEndRef} />
+                    </div>
+                    <div className="p-4 bg-[#131722]/50 border-t border-[#2a2e39] shrink-0">
+                        <input type="text" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSend()}
+                            placeholder="종목을 입력하세요..." className="w-full bg-[#2a2e39] text-white rounded-lg px-4 py-3 outline-none focus:ring-1 focus:ring-[#2962ff]" />
+                    </div>
+                </div>
+            );
+        }
+
+        function App() {
+            const {
+                stockCode, stockName, legendData, isAnalyzing,
+                interval, setInterval, chartSignal,
+                showRanking, setShowRanking, showChat, setShowChat,
+                sentiment, setSentiment, setLatestData
+            } = useContext(AppContext);
+
+            const [chartData, setChartData] = useState(null);
+            const [indicators, setIndicators] = useState({ ma5: true, ma20: true, ma60: false, bb: true, srDyn: true, sr5: true, sr20: false, sr60: false, pivot: false, sr1: false, sr2: false });
+
+            const toggle = (key) => setIndicators(prev => ({ ...prev, [key]: !prev[key] }));
+
+            useEffect(() => {
+                if (!stockCode) { setChartData(null); setLatestData(null); return; }
+                setChartData(null);
+                fetch(`/api/chart_data?code=${encodeURIComponent(stockCode)}&name=${encodeURIComponent(stockName || '')}&interval=${interval}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.status === 'success') { setChartData(data); setLatestData(data.latest); }
+                    });
+            }, [stockCode, interval]);
+
+            useEffect(() => {
+                if (!stockCode) { setSentiment(null); return; }
+                fetch(`/fetch_market_sentiment?code=${encodeURIComponent(stockCode)}&name=${encodeURIComponent(stockName || '')}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            setSentiment({ score: data.score, reason: data.reason });
+                        } else {
+                            setSentiment(null);
+                        }
+                    }).catch(() => setSentiment(null));
+            }, [stockCode, stockName]);
+
+            const isLoading = isAnalyzing || (stockCode && !chartData);
+            const isUS = stockCode && stockCode.startsWith("US:");
+            const formatPrice = (val) => (val === null || val === undefined) ? '' : (isUS ? Number(val).toFixed(2) : Math.floor(val).toLocaleString());
+
+            return (
+                <div className="flex flex-col w-full h-screen bg-[#131722] overflow-hidden text-sm">
+                    {/* 상단 메인 컨텐츠 영역 (Ranking, Chart, Chat) */}
+                    <div className="flex flex-1 w-full min-h-0 overflow-hidden">
+                        {/* 왼쪽: 실시간 AI 픽 패널 */}
+                        <div className={showRanking ? "h-full shrink-0" : "hidden"}>
+                            <RankingPanel />
+                        </div>
+
+                        <div className="flex-1 flex flex-col h-full relative border-r border-[#1e222d] min-w-0">
+                            {/* 헤더 영역의 높이를 고정하여 마우스 호버 시 레이아웃이 밀리는 현상 방지 */}
+                            <div className="relative w-full h-[95px] border-b border-[#1e222d] bg-[#131722]/95 z-50 px-5 py-3 shrink-0 flex items-center overflow-visible">
+                                <div className="flex flex-col justify-center w-full min-w-max">
+                                    {stockCode && !isLoading ? (
+                                        <>
+                                            <div className="flex items-center justify-between w-full">
+                                                <div className="flex items-center gap-3">
+                                                    <button onClick={() => setShowRanking(!showRanking)} className="p-1.5 mr-1 bg-[#1e222d] border border-[#2a2e39] rounded text-gray-400 hover:text-white hover:bg-[#2a2e39] transition-colors" title="AI 픽 목록 토글">
+                                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+                                                    </button>
+
+                                                    <span className="font-bold text-white text-xl tracking-tight">{stockName} <span className="text-gray-500 text-sm ml-2 font-normal">{stockCode}</span></span>
+
+                                                    {chartSignal && (
+                                                        <span className={`${chartSignal.color} text-white px-2 py-0.5 rounded text-xs font-bold animate-pulse transition-all`}>
+                                                            {chartSignal.text}
+                                                        </span>
+                                                    )}
+                                                </div>
+
+                                                <div className="flex items-center gap-4">
+                                                    <div className="flex bg-[#1e222d] rounded p-1 border border-[#2a2e39] shrink-0">
+                                                        {[{ label: '1분', val: '1m' }, { label: '5분', val: '5m' }, { label: '15분', val: '15m' }, { label: '1일', val: '1d' }, { label: '1주', val: '1w' }].map(btn => (
+                                                            <button key={btn.val} onClick={() => setInterval(btn.val)} className={`px-3 py-1 text-xs font-bold rounded transition-colors ${interval === btn.val ? 'bg-[#2962ff] text-white' : 'text-gray-400 hover:text-white'}`}>{btn.label}</button>
+                                                        ))}
+                                                    </div>
+
+                                                    <button onClick={() => setShowChat(!showChat)} className="flex items-center justify-center min-w-[90px] p-1.5 bg-[#1e222d] border border-[#2a2e39] rounded text-gray-400 hover:text-white hover:bg-[#2a2e39] transition-colors font-bold text-xs" title="AI 리포트 토글">
+                                                        {showChat ? '리포트 닫기 ▶' : '◀ 리포트 열기'}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            {legendData && (
+                                                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-[0.75rem] font-mono">
+                                                    <span className="text-gray-400">종가 <span className="text-white ml-0.5 font-bold">{formatPrice(legendData.close)}</span></span>
+                                                    <div className="w-px h-3 bg-[#2a2e39]"></div>
+                                                    <div className="flex gap-2 font-bold">
+                                                        {indicators.ma5 && <span className="text-[#ec4899]">5선: {formatPrice(legendData.ma5)}</span>}
+                                                        {indicators.ma20 && <span className="text-[#f59e0b]">20선: {formatPrice(legendData.ma20)}</span>}
+                                                    </div>
+                                                    <div className="w-px h-3 bg-[#2a2e39]"></div>
+                                                    <span className="text-[#06b6d4] font-bold">RSI: {legendData.rsi ? legendData.rsi.toFixed(1) : 0}</span>
+                                                </div>
+                                            )}
+                                        </>
+                                    ) : (
+                                        <div className="flex justify-between items-center w-full">
+                                            <div className="flex items-center gap-3">
+                                                <button onClick={() => setShowRanking(!showRanking)} className="p-1.5 bg-[#1e222d] border border-[#2a2e39] rounded text-gray-400 hover:text-white hover:bg-[#2a2e39] transition-colors" title="AI 픽 목록 토글">
+                                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+                                                </button>
+                                                <span className="text-gray-500 font-bold text-lg ml-1">AI 퀀트 시스템</span>
+                                            </div>
+                                            <button onClick={() => setShowChat(!showChat)} className="flex items-center justify-center min-w-[90px] p-1.5 bg-[#1e222d] border border-[#2a2e39] rounded text-gray-400 hover:text-white hover:bg-[#2a2e39] transition-colors font-bold text-xs" title="AI 리포트 토글">
+                                                {showChat ? '리포트 닫기 ▶' : '◀ 리포트 열기'}
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {chartData && !isLoading && (
+                                <div className="w-full bg-[#181c25] border-b border-[#2a2e39] px-4 py-2 flex flex-wrap gap-x-6 gap-y-2 items-center shrink-0 z-30">
+                                    <div className="flex items-center gap-2">
+                                        <ToggleSwitch label="Dyn S/R" color="bg-emerald-600" active={indicators.srDyn} onClick={() => toggle('srDyn')} />
+                                        <ToggleSwitch label="5선" color="bg-[#ec4899]" active={indicators.ma5} onClick={() => toggle('ma5')} />
+                                        <ToggleSwitch label="20선" color="bg-[#f59e0b]" active={indicators.ma20} onClick={() => toggle('ma20')} />
+                                        <ToggleSwitch label="볼린저" color="bg-gray-500" active={indicators.bb} onClick={() => toggle('bb')} />
+                                    </div>
+                                    <div className="w-px h-4 bg-[#2a2e39]"></div>
+                                    <div className="flex items-center gap-2">
+                                        <ToggleSwitch label="5선 지지" color="bg-[#22c55e]" active={indicators.sr5} onClick={() => toggle('sr5')} />
+                                        <ToggleSwitch label="20선 지지" color="bg-[#16a34a]" active={indicators.sr20} onClick={() => toggle('sr20')} />
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="flex-1 w-full relative min-h-0">
+                                {isLoading ? (
+                                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 gap-4">
+                                        <div className="w-8 h-8 border-4 border-[#2a2e39] border-t-[#2962ff] rounded-full animate-spin"></div>
+                                        <div className="font-bold animate-pulse text-[#8b95a1]">{isAnalyzing ? "AI 분석 리포트 생성 중..." : "데이터 로딩 중..."}</div>
+                                    </div>
+                                ) : chartData ? <TVChart data={chartData} indicators={indicators} /> : (
+                                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-600 gap-4">
+                                        <span>왼쪽 리스트에서 종목을 선택해 주세요</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* 오른쪽: AI 분석 리포트 패널 */}
+                        <div className={showChat ? "h-full shrink-0" : "hidden"}>
+                            <ChatPanel />
+                        </div>
+                    </div>
+
+                    {/* 모든 div 아래에 Footer 추가 */}
+                    <div className="w-full shrink-0 bg-[#0e1117] border-t border-[#2a2e39] px-6 py-2 flex items-center justify-between z-50">
+                        <div className="flex items-center gap-3">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[#2962ff] animate-pulse"></span>
+                            <span className="text-[11px] text-gray-600 font-medium tracking-wide">Quant Hybrid RAG AI · 실시간 분석 시스템</span>
+                        </div>
+                        <div className="flex items-center gap-4 text-[11px] text-gray-700">
+                            <span>투자 판단의 책임은 본인에게 있습니다</span>
+                            <span className="text-[#2a2e39]">|</span>
+                            <span className="text-gray-600">v1.0</span>
+                        </div>
+                    </div>
+
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<AppProvider><App /></AppProvider>);
+    </script>
+</body>
+
+</html>
