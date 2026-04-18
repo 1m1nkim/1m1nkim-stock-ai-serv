@@ -120,6 +120,10 @@
             const [analysisQuery, setAnalysisQuery] = useState(null);
             const [chartSignal, setChartSignal] = useState(null);
 
+            const [showRanking, setShowRanking] = useState(true);
+            const [showChat, setShowChat] = useState(true);
+            const [sentiment, setSentiment] = useState(null);
+
             const setStockInfo = (code, name) => { setStockCode(code); setStockName(name); };
 
             return (
@@ -130,7 +134,10 @@
                     isAnalyzing, setIsAnalyzing,
                     interval, setInterval,
                     analysisQuery, setAnalysisQuery,
-                    chartSignal, setChartSignal
+                    chartSignal, setChartSignal,
+                    showRanking, setShowRanking,
+                    showChat, setShowChat,
+                    sentiment, setSentiment
                 }}>
                     {children}
                 </AppContext.Provider>
@@ -162,6 +169,9 @@
             useEffect(() => {
                 if (!data || !mainContainerRef.current || !volContainerRef.current || !rsiContainerRef.current) return;
 
+                srRefs.current = [];
+                seriesRefs.current = {};
+
                 const cleanHistory = [...data.history]
                     .filter(item => item && item.time)
                     .map(item => {
@@ -188,8 +198,12 @@
 
                 const commonOptions = {
                     layout: { background: { type: 'solid', color: '#131722' }, textColor: '#8b95a1', fontSize: 11 },
-                    grid: { vertLines: { color: 'rgba(42, 46, 57, 0.05)' }, horzLines: { color: 'rgba(42, 46, 57, 0.05)' } },
-                    crosshair: { mode: CrosshairMode.Normal },
+                    grid: { vertLines: { color: 'rgba(255,255,255,0.03)' }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
+                    crosshair: {
+                        mode: CrosshairMode.Normal,
+                        vertLine: { color: 'rgba(117, 134, 150, 0.8)', width: 1.5, style: 2, labelVisible: false },
+                        horzLine: { color: 'rgba(117, 134, 150, 0.8)', width: 1.5, style: 2, labelVisible: true }
+                    },
                     rightPriceScale: { visible: true, borderColor: '#2a2e39', minimumWidth: 80 },
                     leftPriceScale: { visible: false },
                     timeScale: {
@@ -209,7 +223,6 @@
                 const mainChart = createChart(mainContainerRef.current, {
                     ...commonOptions,
                     timeScale: { ...commonOptions.timeScale, visible: false },
-                    crosshair: { mode: CrosshairMode.Normal, vertLine: { labelVisible: false } }
                 });
                 chartsRef.current.main = mainChart;
                 mainChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
@@ -220,7 +233,6 @@
                 });
                 candlestickSeries.setData(uniqueHistory);
 
-                // 💡 화살표 마커 (텍스트 제거 버전)
                 const markers = [];
                 uniqueHistory.forEach((candle, i) => {
                     if (candle.rsi > 75) markers.push({ time: candle.time, position: 'aboveBar', color: '#ef5350', shape: 'arrowDown' });
@@ -228,7 +240,6 @@
                 });
                 candlestickSeries.setMarkers(markers);
 
-                // --- 기술 지표 라인 설정 ---
                 const overlayOptions = { priceScaleId: 'right', lastValueVisible: false, lineStyle: 0, autoscaleInfoProvider: () => null, crosshairMarkerVisible: false };
 
                 seriesRefs.current.ma5 = mainChart.addLineSeries({ ...overlayOptions, color: '#ec4899', lineWidth: 1.5, visible: indicators.ma5 });
@@ -246,7 +257,6 @@
                 seriesRefs.current.bb_lower = mainChart.addLineSeries({ ...overlayOptions, color: 'rgba(156, 163, 175, 0.3)', lineWidth: 1, visible: indicators.bb });
                 seriesRefs.current.bb_lower.setData(uniqueHistory.map(item => ({ time: item.time, value: item.bb_lower })).filter(d => d.value !== undefined));
 
-                // --- 고정 지지/저항선 ---
                 const linesConfig = [
                     { stateKey: 'sr5', price: latest.support_5, color: '#22c55e', lineWidth: 1 },
                     { stateKey: 'sr5', price: latest.resist_5, color: '#22c55e', lineWidth: 1 },
@@ -255,6 +265,8 @@
                     { stateKey: 'sr60', price: latest.support_60, color: '#15803d', lineWidth: 3 },
                     { stateKey: 'sr60', price: latest.resist_60, color: '#15803d', lineWidth: 3 },
                     { stateKey: 'pivot', price: latest.pivot, color: '#eab308', lineWidth: 2 },
+                    { stateKey: 'srDyn', price: latest.support_dyn, color: '#10b981', lineWidth: 2 },
+                    { stateKey: 'srDyn', price: latest.resist_dyn, color: '#ef4444', lineWidth: 2 },
                     { stateKey: 'sr1', price: latest.s1, color: '#d946ef', lineWidth: 1 },
                     { stateKey: 'sr1', price: latest.r1, color: '#d946ef', lineWidth: 1 },
                     { stateKey: 'sr2', price: latest.s2, color: '#c026d3', lineWidth: 2 },
@@ -288,7 +300,10 @@
                 const rsiChart = createChart(rsiContainerRef.current, {
                     ...commonOptions,
                     timeScale: { ...commonOptions.timeScale, visible: true, rightOffset: 5 },
-                    crosshair: { mode: CrosshairMode.Normal, vertLine: { labelVisible: true }, horzLine: { visible: false, labelVisible: false } }
+                    crosshair: {
+                        ...commonOptions.crosshair,
+                        vertLine: { ...commonOptions.crosshair.vertLine, labelVisible: true },
+                    }
                 });
                 chartsRef.current.rsi = rsiChart;
                 const rsiSeries = rsiChart.addLineSeries({ color: '#06b6d4', lineWidth: 1.5, priceScaleId: 'right' });
@@ -296,13 +311,46 @@
                 rsiSeries.createPriceLine({ price: 70, color: '#ef5350', lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
                 rsiSeries.createPriceLine({ price: 30, color: '#2962ff', lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
 
-                // --- 💡 동기화 및 실시간 마우스 오버 시그널 업데이트 ---
+                let activeChart = null;
+                const syncCrosshair = (sourceChart, param) => {
+                    const chartsData = [
+                        { chart: mainChart, series: candlestickSeries },
+                        { chart: volChart, series: volumeSeries },
+                        { chart: rsiChart, series: rsiSeries }
+                    ];
+
+                    const isNatural = !!param.point;
+                    if (isNatural && activeChart !== sourceChart) {
+                        activeChart = sourceChart;
+                        chartsData.forEach(({ chart }) => {
+                            chart.applyOptions({
+                                crosshair: {
+                                    horzLine: {
+                                        visible: chart === sourceChart,
+                                        labelVisible: chart === sourceChart
+                                    }
+                                }
+                            });
+                        });
+                    }
+
+                    chartsData.forEach(({ chart, series }) => {
+                        if (chart !== sourceChart) {
+                            if (param.time) {
+                                chart.setCrosshairPosition(0, param.time, series);
+                            } else {
+                                chart.clearCrosshairPosition();
+                            }
+                        }
+                    });
+                };
+
                 mainChart.subscribeCrosshairMove(param => {
+                    syncCrosshair(mainChart, param);
                     if (param.time) {
                         const candle = uniqueHistory.find(h => h.time === param.time);
                         if (candle) {
                             setLegendData(candle);
-                            // 💡 상단 뱃지 텍스트 실시간 연동
                             if (candle.rsi > 75) setChartSignal({ text: "단기 고점 (매도주의)", color: "bg-red-500" });
                             else if (candle.rsi < 35) setChartSignal({ text: "단기 저점 (매수찬스)", color: "bg-green-500" });
                             else if (candle.rsi > 70) setChartSignal({ text: "과열 구간", color: "bg-orange-500" });
@@ -317,12 +365,55 @@
                     }
                 });
 
+                volChart.subscribeCrosshairMove(param => {
+                    syncCrosshair(volChart, param);
+                });
+
+                rsiChart.subscribeCrosshairMove(param => {
+                    syncCrosshair(rsiChart, param);
+                });
+
+                // 마우스가 차트 영역을 완전히 벗어날 때 십자선 제거 및 헤더 초기화
+                const handleMouseLeave = () => {
+                    activeChart = null;
+                    [mainChart, volChart, rsiChart].forEach(c => {
+                        c.clearCrosshairPosition();
+                        c.applyOptions({ crosshair: { horzLine: { visible: true, labelVisible: true } } });
+                    });
+                    const last = uniqueHistory[uniqueHistory.length - 1];
+                    setLegendData(last);
+                };
+
+                mainContainerRef.current.addEventListener('mouseleave', handleMouseLeave);
+                volContainerRef.current.addEventListener('mouseleave', handleMouseLeave);
+                rsiContainerRef.current.addEventListener('mouseleave', handleMouseLeave);
+
                 mainChart.timeScale().subscribeVisibleLogicalRangeChange(r => { volChart.timeScale().setVisibleLogicalRange(r); rsiChart.timeScale().setVisibleLogicalRange(r); });
                 volChart.timeScale().subscribeVisibleLogicalRangeChange(r => { mainChart.timeScale().setVisibleLogicalRange(r); rsiChart.timeScale().setVisibleLogicalRange(r); });
                 rsiChart.timeScale().subscribeVisibleLogicalRangeChange(r => { mainChart.timeScale().setVisibleLogicalRange(r); volChart.timeScale().setVisibleLogicalRange(r); });
 
                 return () => { mainChart.remove(); volChart.remove(); rsiChart.remove(); };
-            }, [data, indicators]);
+            }, [data]);
+
+            useEffect(() => {
+                const s = seriesRefs.current || {};
+                if (s.ma5) s.ma5.applyOptions({ visible: !!indicators.ma5 });
+                if (s.ma20) s.ma20.applyOptions({ visible: !!indicators.ma20 });
+                if (s.ma60) s.ma60.applyOptions({ visible: !!indicators.ma60 });
+
+                const bbVisible = !!indicators.bb;
+                if (s.bb_upper) s.bb_upper.applyOptions({ visible: bbVisible });
+                if (s.bb_lower) s.bb_lower.applyOptions({ visible: bbVisible });
+
+                if (Array.isArray(srRefs.current)) {
+                    srRefs.current.forEach(({ stateKey, line, color }) => {
+                        try {
+                            const on = !!indicators[stateKey];
+                            line.applyOptions({ color: on ? color : 'rgba(0,0,0,0)' });
+                        } catch (e) { }
+                    });
+                }
+            }, [indicators]);
 
             return (
                 <div className="w-full h-full flex flex-col relative bg-[#131722]">
@@ -338,7 +429,7 @@
         }
 
         function RankingPanel() {
-            const { setStockInfo, setLegendData, setLatestData, setIsAnalyzing, setAnalysisQuery } = useContext(AppContext);
+            const { setStockInfo, setIsAnalyzing, setAnalysisQuery } = useContext(AppContext);
             const [rankedStocks, setRankedStocks] = useState([]);
             const [loading, setLoading] = useState(true);
 
@@ -358,7 +449,7 @@
 
             return (
                 <div className="w-[320px] h-full bg-[#1e222d] border-r border-[#2a2e39] flex flex-col shrink-0 text-sm">
-                    <div className="p-4 border-b border-[#2a2e39] bg-[#131722]/50">
+                    <div className="p-4 border-b border-[#2a2e39] bg-[#131722]/50 shrink-0">
                         <h2 className="font-bold text-white flex items-center gap-2">
                             <span className="w-2.5 h-2.5 rounded-full bg-[#ef5350] animate-pulse"></span> 실시간 AI 픽
                         </h2>
@@ -390,7 +481,7 @@
         }
 
         function ChatPanel() {
-            const { setStockInfo, setIsAnalyzing, analysisQuery, setAnalysisQuery } = useContext(AppContext);
+            const { setStockInfo, analysisQuery, setAnalysisQuery } = useContext(AppContext);
             const [messages, setMessages] = useState([{ type: 'ai', text: '어떤 종목을 분석해드릴까요?', isStreaming: false }]);
             const [input, setInput] = useState('');
             const [loading, setLoading] = useState(false);
@@ -458,8 +549,8 @@
             useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
             return (
-                <div className="flex flex-col h-full bg-[#1e222d] border-l border-[#2a2e39] text-sm">
-                    <div className="p-4 border-b border-[#2a2e39] bg-[#131722]/50 font-bold text-white flex items-center">
+                <div className="flex flex-col h-full bg-[#1e222d] border-l border-[#2a2e39] text-sm w-[450px]">
+                    <div className="p-4 border-b border-[#2a2e39] bg-[#131722]/50 font-bold text-white flex items-center shrink-0">
                         <span className="w-2 h-2 rounded-full bg-[#2962ff] mr-2"></span> AI 분석 리포트
                     </div>
                     <div className="flex-1 overflow-y-auto p-5 space-y-5">
@@ -472,7 +563,7 @@
                         ))}
                         <div ref={messagesEndRef} />
                     </div>
-                    <div className="p-4 bg-[#131722]/50 border-t border-[#2a2e39]">
+                    <div className="p-4 bg-[#131722]/50 border-t border-[#2a2e39] shrink-0">
                         <input type="text" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSend()}
                             placeholder="종목을 입력하세요..." className="w-full bg-[#2a2e39] text-white rounded-lg px-4 py-3 outline-none focus:ring-1 focus:ring-[#2962ff]" />
                     </div>
@@ -481,21 +572,17 @@
         }
 
         function App() {
-            const { stockCode, stockName, legendData, latestData, setLatestData, isAnalyzing, interval, setInterval, chartSignal } = useContext(AppContext);
-            const [chartData, setChartData] = useState(null);
+            const {
+                stockCode, stockName, legendData, isAnalyzing,
+                interval, setInterval, chartSignal,
+                showRanking, setShowRanking, showChat, setShowChat,
+                sentiment, setSentiment, setLatestData
+            } = useContext(AppContext);
 
-            // 💡 볼린저 밴드(bb) 초기 활성화 설정
-            const [indicators, setIndicators] = useState({ ma5: true, ma20: true, ma60: false, bb: true, sr5: true, sr20: false, sr60: false, pivot: false, sr1: false, sr2: false });
+            const [chartData, setChartData] = useState(null);
+            const [indicators, setIndicators] = useState({ ma5: true, ma20: true, ma60: false, bb: true, srDyn: true, sr5: true, sr20: false, sr60: false, pivot: false, sr1: false, sr2: false });
 
             const toggle = (key) => setIndicators(prev => ({ ...prev, [key]: !prev[key] }));
-            const toggleGroup = (keys) => {
-                setIndicators(prev => {
-                    const allOn = keys.every(k => prev[k]);
-                    const nextState = { ...prev };
-                    keys.forEach(k => { nextState[k] = !allOn; });
-                    return nextState;
-                });
-            };
 
             useEffect(() => {
                 if (!stockCode) { setChartData(null); setLatestData(null); return; }
@@ -507,80 +594,143 @@
                     });
             }, [stockCode, interval]);
 
+            useEffect(() => {
+                if (!stockCode) { setSentiment(null); return; }
+                fetch(`/fetch_market_sentiment?code=${encodeURIComponent(stockCode)}&name=${encodeURIComponent(stockName || '')}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            setSentiment({ score: data.score, reason: data.reason });
+                        } else {
+                            setSentiment(null);
+                        }
+                    }).catch(() => setSentiment(null));
+            }, [stockCode, stockName]);
+
             const isLoading = isAnalyzing || (stockCode && !chartData);
             const isUS = stockCode && stockCode.startsWith("US:");
             const formatPrice = (val) => (val === null || val === undefined) ? '' : (isUS ? Number(val).toFixed(2) : Math.floor(val).toLocaleString());
 
             return (
-                <div className="flex w-full h-[100vh] bg-[#131722] overflow-hidden text-sm">
-                    <RankingPanel />
-                    <div className="flex-1 flex flex-col h-full relative border-r border-[#1e222d] min-w-0">
-                        <div className="w-full min-h-[65px] border-b border-[#1e222d] bg-[#131722]/95 z-40 px-5 py-3 shrink-0 flex justify-between items-center overflow-x-auto">
-                            <div className="flex flex-col justify-center w-full min-w-max">
-                                {stockCode && !isLoading ? (
-                                    <>
-                                        <div className="flex items-center justify-between w-full">
-                                            <div className="flex items-center gap-3">
-                                                <span className="font-bold text-white text-xl tracking-tight">{stockName} <span className="text-gray-500 text-sm ml-2 font-normal">{stockCode}</span></span>
-                                                {/* 💡 실시간 시그널 뱃지 */}
-                                                {chartSignal && (
-                                                    <span className={`${chartSignal.color} text-white px-2 py-0.5 rounded text-xs font-bold animate-pulse transition-all`}>
-                                                        {chartSignal.text}
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <div className="flex bg-[#1e222d] rounded p-1 border border-[#2a2e39] shrink-0 ml-4">
-                                                {[{ label: '1분', val: '1m' }, { label: '5분', val: '5m' }, { label: '15분', val: '15m' }, { label: '1일', val: '1d' }, { label: '1주', val: '1w' }].map(btn => (
-                                                    <button key={btn.val} onClick={() => setInterval(btn.val)} className={`px-3 py-1 text-xs font-bold rounded transition-colors ${interval === btn.val ? 'bg-[#2962ff] text-white' : 'text-gray-400 hover:text-white'}`}>{btn.label}</button>
-                                                ))}
-                                            </div>
-                                        </div>
-                                        {legendData && (
-                                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-[0.75rem] font-mono">
-                                                <span className="text-gray-400">종가 <span className="text-white ml-0.5 font-bold">{formatPrice(legendData.close)}</span></span>
-                                                <div className="w-px h-3 bg-[#2a2e39]"></div>
-                                                <div className="flex gap-2 font-bold">
-                                                    {indicators.ma5 && <span className="text-[#ec4899]">5선: {formatPrice(legendData.ma5)}</span>}
-                                                    {indicators.ma20 && <span className="text-[#f59e0b]">20선: {formatPrice(legendData.ma20)}</span>}
-                                                </div>
-                                                <div className="w-px h-3 bg-[#2a2e39]"></div>
-                                                <span className="text-[#06b6d4] font-bold">RSI: {legendData.rsi ? legendData.rsi.toFixed(1) : 0}</span>
-                                            </div>
-                                        )}
-                                    </>
-                                ) : <div className="text-gray-500 font-bold text-lg">AI 퀀트 시스템</div>}
-                            </div>
+                <div className="flex flex-col w-full h-screen bg-[#131722] overflow-hidden text-sm">
+                    {/* 상단 메인 컨텐츠 영역 (Ranking, Chart, Chat) */}
+                    <div className="flex flex-1 w-full min-h-0 overflow-hidden">
+                        {/* 왼쪽: 실시간 AI 픽 패널 */}
+                        <div className={showRanking ? "h-full shrink-0" : "hidden"}>
+                            <RankingPanel />
                         </div>
 
-                        {chartData && !isLoading && (
-                            <div className="w-full bg-[#181c25] border-b border-[#2a2e39] px-4 py-2 flex flex-wrap gap-x-6 gap-y-2 items-center shrink-0 z-30">
-                                <div className="flex items-center gap-2">
-                                    <ToggleSwitch label="5선" color="bg-[#ec4899]" active={indicators.ma5} onClick={() => toggle('ma5')} />
-                                    <ToggleSwitch label="20선" color="bg-[#f59e0b]" active={indicators.ma20} onClick={() => toggle('ma20')} />
-                                    <ToggleSwitch label="볼린저" color="bg-gray-500" active={indicators.bb} onClick={() => toggle('bb')} />
-                                </div>
-                                <div className="w-px h-4 bg-[#2a2e39]"></div>
-                                <div className="flex items-center gap-2">
-                                    <ToggleSwitch label="5선 지지" color="bg-[#22c55e]" active={indicators.sr5} onClick={() => toggle('sr5')} />
-                                    <ToggleSwitch label="20선 지지" color="bg-[#16a34a]" active={indicators.sr20} onClick={() => toggle('sr20')} />
+                        <div className="flex-1 flex flex-col h-full relative border-r border-[#1e222d] min-w-0">
+                            {/* 헤더 영역의 높이를 고정하여 마우스 호버 시 레이아웃이 밀리는 현상 방지 */}
+                            <div className="relative w-full h-[95px] border-b border-[#1e222d] bg-[#131722]/95 z-50 px-5 py-3 shrink-0 flex items-center overflow-visible">
+                                <div className="flex flex-col justify-center w-full min-w-max">
+                                    {stockCode && !isLoading ? (
+                                        <>
+                                            <div className="flex items-center justify-between w-full">
+                                                <div className="flex items-center gap-3">
+                                                    <button onClick={() => setShowRanking(!showRanking)} className="p-1.5 mr-1 bg-[#1e222d] border border-[#2a2e39] rounded text-gray-400 hover:text-white hover:bg-[#2a2e39] transition-colors" title="AI 픽 목록 토글">
+                                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+                                                    </button>
+
+                                                    <span className="font-bold text-white text-xl tracking-tight">{stockName} <span className="text-gray-500 text-sm ml-2 font-normal">{stockCode}</span></span>
+
+                                                    {chartSignal && (
+                                                        <span className={`${chartSignal.color} text-white px-2 py-0.5 rounded text-xs font-bold animate-pulse transition-all`}>
+                                                            {chartSignal.text}
+                                                        </span>
+                                                    )}
+                                                </div>
+
+                                                <div className="flex items-center gap-4">
+                                                    <div className="flex bg-[#1e222d] rounded p-1 border border-[#2a2e39] shrink-0">
+                                                        {[{ label: '1분', val: '1m' }, { label: '5분', val: '5m' }, { label: '15분', val: '15m' }, { label: '1일', val: '1d' }, { label: '1주', val: '1w' }].map(btn => (
+                                                            <button key={btn.val} onClick={() => setInterval(btn.val)} className={`px-3 py-1 text-xs font-bold rounded transition-colors ${interval === btn.val ? 'bg-[#2962ff] text-white' : 'text-gray-400 hover:text-white'}`}>{btn.label}</button>
+                                                        ))}
+                                                    </div>
+
+                                                    <button onClick={() => setShowChat(!showChat)} className="flex items-center justify-center min-w-[90px] p-1.5 bg-[#1e222d] border border-[#2a2e39] rounded text-gray-400 hover:text-white hover:bg-[#2a2e39] transition-colors font-bold text-xs" title="AI 리포트 토글">
+                                                        {showChat ? '리포트 닫기 ▶' : '◀ 리포트 열기'}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            {legendData && (
+                                                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-[0.75rem] font-mono">
+                                                    <span className="text-gray-400">종가 <span className="text-white ml-0.5 font-bold">{formatPrice(legendData.close)}</span></span>
+                                                    <div className="w-px h-3 bg-[#2a2e39]"></div>
+                                                    <div className="flex gap-2 font-bold">
+                                                        {indicators.ma5 && <span className="text-[#ec4899]">5선: {formatPrice(legendData.ma5)}</span>}
+                                                        {indicators.ma20 && <span className="text-[#f59e0b]">20선: {formatPrice(legendData.ma20)}</span>}
+                                                    </div>
+                                                    <div className="w-px h-3 bg-[#2a2e39]"></div>
+                                                    <span className="text-[#06b6d4] font-bold">RSI: {legendData.rsi ? legendData.rsi.toFixed(1) : 0}</span>
+                                                </div>
+                                            )}
+                                        </>
+                                    ) : (
+                                        <div className="flex justify-between items-center w-full">
+                                            <div className="flex items-center gap-3">
+                                                <button onClick={() => setShowRanking(!showRanking)} className="p-1.5 bg-[#1e222d] border border-[#2a2e39] rounded text-gray-400 hover:text-white hover:bg-[#2a2e39] transition-colors" title="AI 픽 목록 토글">
+                                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+                                                </button>
+                                                <span className="text-gray-500 font-bold text-lg ml-1">AI 퀀트 시스템</span>
+                                            </div>
+                                            <button onClick={() => setShowChat(!showChat)} className="flex items-center justify-center min-w-[90px] p-1.5 bg-[#1e222d] border border-[#2a2e39] rounded text-gray-400 hover:text-white hover:bg-[#2a2e39] transition-colors font-bold text-xs" title="AI 리포트 토글">
+                                                {showChat ? '리포트 닫기 ▶' : '◀ 리포트 열기'}
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
-                        )}
 
-                        <div className="flex-1 w-full relative min-h-0">
-                            {isLoading ? (
-                                <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 gap-4">
-                                    <div className="w-8 h-8 border-4 border-[#2a2e39] border-t-[#2962ff] rounded-full animate-spin"></div>
-                                    <div className="font-bold animate-pulse text-[#8b95a1]">{isAnalyzing ? "AI 분석 리포트 생성 중..." : "데이터 로딩 중..."}</div>
-                                </div>
-                            ) : chartData ? <TVChart data={chartData} indicators={indicators} /> : (
-                                <div className="w-full h-full flex flex-col items-center justify-center text-gray-600 gap-4">
-                                    <span>왼쪽 리스트에서 종목을 선택해 주세요</span>
+                            {chartData && !isLoading && (
+                                <div className="w-full bg-[#181c25] border-b border-[#2a2e39] px-4 py-2 flex flex-wrap gap-x-6 gap-y-2 items-center shrink-0 z-30">
+                                    <div className="flex items-center gap-2">
+                                        <ToggleSwitch label="Dyn S/R" color="bg-emerald-600" active={indicators.srDyn} onClick={() => toggle('srDyn')} />
+                                        <ToggleSwitch label="5선" color="bg-[#ec4899]" active={indicators.ma5} onClick={() => toggle('ma5')} />
+                                        <ToggleSwitch label="20선" color="bg-[#f59e0b]" active={indicators.ma20} onClick={() => toggle('ma20')} />
+                                        <ToggleSwitch label="볼린저" color="bg-gray-500" active={indicators.bb} onClick={() => toggle('bb')} />
+                                    </div>
+                                    <div className="w-px h-4 bg-[#2a2e39]"></div>
+                                    <div className="flex items-center gap-2">
+                                        <ToggleSwitch label="5선 지지" color="bg-[#22c55e]" active={indicators.sr5} onClick={() => toggle('sr5')} />
+                                        <ToggleSwitch label="20선 지지" color="bg-[#16a34a]" active={indicators.sr20} onClick={() => toggle('sr20')} />
+                                    </div>
                                 </div>
                             )}
+
+                            <div className="flex-1 w-full relative min-h-0">
+                                {isLoading ? (
+                                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 gap-4">
+                                        <div className="w-8 h-8 border-4 border-[#2a2e39] border-t-[#2962ff] rounded-full animate-spin"></div>
+                                        <div className="font-bold animate-pulse text-[#8b95a1]">{isAnalyzing ? "AI 분석 리포트 생성 중..." : "데이터 로딩 중..."}</div>
+                                    </div>
+                                ) : chartData ? <TVChart data={chartData} indicators={indicators} /> : (
+                                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-600 gap-4">
+                                        <span>왼쪽 리스트에서 종목을 선택해 주세요</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* 오른쪽: AI 분석 리포트 패널 */}
+                        <div className={showChat ? "h-full shrink-0" : "hidden"}>
+                            <ChatPanel />
                         </div>
                     </div>
-                    <div className="w-[450px] shrink-0 h-full"><ChatPanel /></div>
+
+                    {/* 모든 div 아래에 Footer 추가 */}
+                    <div className="w-full shrink-0 bg-[#0e1117] border-t border-[#2a2e39] px-6 py-2 flex items-center justify-between z-50">
+                        <div className="flex items-center gap-3">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[#2962ff] animate-pulse"></span>
+                            <span className="text-[11px] text-gray-600 font-medium tracking-wide">Quant Hybrid RAG AI · 실시간 분석 시스템</span>
+                        </div>
+                        <div className="flex items-center gap-4 text-[11px] text-gray-700">
+                            <span>투자 판단의 책임은 본인에게 있습니다</span>
+                            <span className="text-[#2a2e39]">|</span>
+                            <span className="text-gray-600">v1.0</span>
+                        </div>
+                    </div>
+
                 </div>
             );
         }

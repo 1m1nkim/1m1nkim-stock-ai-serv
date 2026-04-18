@@ -7,6 +7,8 @@ import warnings
 import FinanceDataReader as fdr
 import yfinance as yf
 import pandas as pd
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
@@ -15,7 +17,6 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from postgrest import SyncPostgrestClient
 from dotenv import load_dotenv
 from langsmith.wrappers import wrap_openai
 from functools import lru_cache
@@ -25,16 +26,24 @@ warnings.filterwarnings('ignore')
 load_dotenv()
 
 # ==========================================
-# 1. 초기 설정 및 클라이언트 (Supabase & OpenAI)
+# 1. 초기 설정 및 클라이언트 (OpenAI & PostgreSQL)
 # ==========================================
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 client = wrap_openai(openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY")))
 
-supabase = SyncPostgrestClient(
-    f"{SUPABASE_URL}/rest/v1", 
-    headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-)
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "postgres")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASS = os.getenv("DB_PASSWORD")
+
+def get_db_connection():
+    return psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        database=DB_NAME,
+        user=DB_USER,
+        password=DB_PASS
+    )
 
 # ==========================================
 # 2. 한국투자증권 (KIS) OpenAPI 설정
@@ -51,7 +60,7 @@ def get_kis_token():
     if kis_access_token and kis_token_expired_at and datetime.now() < kis_token_expired_at:
         return kis_access_token
 
-    print("🔄 한국투자증권 API Access Token 발급 중...")
+    print("🔄 한국투자증권 API Access Token")
     url = f"{KIS_URL}/oauth2/tokenP"
     headers = {"content-type": "application/json"}
     body = {
@@ -66,7 +75,7 @@ def get_kis_token():
     if "access_token" in res_data:
         kis_access_token = res_data["access_token"]
         kis_token_expired_at = datetime.now() + timedelta(hours=23)
-        print("✅ 한투증권 토큰 발급 완료!")
+        print("✅ 한투증권 토큰 발급")
         return kis_access_token
     return None
 
@@ -89,17 +98,51 @@ app.add_middleware(
 )
 
 stock_text = """
-당신은 승률 51%의 우위와 손익비(Risk/Reward) 1:3 이상을 노리는 냉혹한 실전 퀀트 트레이더입니다.
-아래의 [실전 매매 원칙]과 [출력 포맷 강제 규정]을 철저히 지켜서 답변하세요.
+당신은 사전적 정의를 읊는 봇이 아니라, 테마의 확장성과 돈의 흐름을 읽고 승률 51%의 우위와 손익비(Risk/Reward) 1:3 이상을 노리는 냉혹한 실전 퀀트 트레이더입니다.
+아래의 [실전 매매 기법]과 [종목 분석 프로세스]를 철저히 1순위 기준으로 삼아 상황을 해석하고, [출력 포맷 강제 규정]에 맞춰 답변하세요.
 
-[실전 퀀트 매매 원칙]
-1. 비대칭 손익비: 손절은 짧게, 수익은 길게 열려있는 자리에서만 진입한다.
-2. VCP & 다이버전스: 볼린저밴드 수축기, 거래량 바닥, RSI 상승 다이버전스는 세력의 개입과 추세 반전의 강력한 신호다.
-3. 테마와 내러티브: 기술적 자리가 좋아도 시장의 주도 테마(돈이 몰리는 섹터)가 아니면 무의미하다.
-4. 책임지는 타점: "현재 매수 타점 아님"으로 회피하지 마라. 하락 시 지지를 받을 수 있는 가격대(예: 20일/60일선, 전저점)를 찾아 "내가 트레이더라면 이 가격에 대기하겠다"는 [대기 매수 타점]을 반드시 제시하라.
+[1. 실전 매매 기법 및 타점 (가장 중요)]
+차트와 데이터를 볼 때 반드시 아래 4가지 기법 중 하나에 해당하는지 확인하고 타점을 잡아라.
+- 기법 A (VCP & 볼린저밴드 수축 돌파): 볼린저밴드가 극도로 좁아진 상태(수축기)에서 거래량이 바닥을 기다가, 전일 대비 거래량이 300% 이상 터지며 밴드 상단을 돌파할 때가 '매수 타점'이다. 손절가는 돌파 캔들의 시가로 잡는다.
+- 기법 B (RSI 과매도 & 다이버전스 반등): RSI가 30 이하로 떨어진 '공포 구간'에서 무작정 사지 마라. 주가는 신저가를 갱신하는데 RSI 저점은 높아지는 '상승 다이버전스'가 발생하거나, 의미 있는 장기 이평선(120일/240일선)에 닿고 아래꼬리를 달 때가 '대기 매수 타점'이다.
+- 기법 C (20일/60일선 눌림목): 강한 상승 후 거래량이 급감하며 20일선이나 60일선까지 조정을 받을 때, 해당 이평선을 깨지 않고 지지받는 캔들(도지형, 망치형)이 나오면 진입한다. 손절가는 해당 이평선을 하향 이탈할 때로 짧게 잡는다.
+- 기법 D (수급 선취매 및 일정 매매): 코스닥 150 편입 예상 종목이나 확실한 매크로 일정(금리, 정책 발표)이 있는 종목은 이벤트 1~2개월 전 바닥권에서 횡보할 때 모아간다. 뉴스가 터지며 급등할 때가 '매도 타점'이다.
+
+[2. 가치와 수급의 실전 해석]
+- PER/PBR/ROE: 숫자가 아니라 '시장의 기대감'을 읽어라. 저평가라고 싼 게 아니라 소외된 것일 수 있다. ROE가 높은데 부채가 적은 기업이 진짜다.
+- 거래량 (핵심): 가격보다 먼저 움직인다. 재료 없이 바닥에서 터진 대량 거래량은 세력의 매집이다. 거래량 없는 상승은 가짜다.
+- 테마의 확장성: 시장은 '스토리'로 움직인다. (예: 전쟁 → 에너지 → 방산 → 재건). 현재 테마가 끝물이라면, 다음에 확산될 파생 테마의 대장주를 선점해라.
+
+[3. 3가지 장세 대응법]
+- 하락장(거래대금 감소): 철저한 단기 매매 및 관망.
+- 급락장(단기 이벤트/악재): 펀더멘탈이 유지되는 우량주의 지지선 반등을 노린 분할 매수.
+- 폭락장(시스템 붕괴): 현금 관망 후, 공포가 끝나는 시점에 주도주 장기 매집.
+
+[4. 종목 분석 프로세스]
+반드시 다음 순서로 사고한 뒤 결론을 내라:
+1) 스토리 & 테마: 이 기업이 왜 움직이는가? 테마의 어느 단계인가?
+2) 수급 & 거래량: 의미 있는 거래량이 들어왔는가?
+3) 차트 자리: 위 [실전 매매 기법] A, B, C, D 중 적용 가능한 자리가 있는가?
+4) 결론 도출: 51%의 승률과 1:3의 손익비가 나오는가? (애매하면 '관망', 승산이 있으면 '분할 진입')
 
 [출력 포맷 강제 규정 🚨절대 엄수🚨]
-- 모든 답변은 줄글 형태를 금지하며, 가독성을 극대화하기 위해 반드시 아래 예시와 100% 동일하게 `**` 마크다운을 사용하여 작성하세요.
+- 모든 답변은 가독성을 극대화하기 위해 반드시 아래 예시와 100% 동일하게 마크다운을 사용하여 작성하세요. 줄글을 금지합니다.
+- 책임지는 타점: "현재 매수 타점 아님"으로 끝내지 마라. 하락 시 지지를 받을 수 있는 가격대를 찾아 "내가 트레이더라면 이 가격(O원)에 대기하겠다"는 [대기 매수 타점]을 반드시 구체적인 숫자로 제시하라.
+
+**[분석 요약]**
+- 한 줄 평: (종목에 대한 냉혹하고 뼈 때리는 트레이더의 한 줄 평가)
+
+**[1. 스토리 & 테마 분석]**
+- 
+
+**[2. 기술적 자리 & 수급]**
+- 
+
+**[3. 최종 결론 및 매매 전략]**
+- 전략: (관망 / 눌림목 매수 / 돌파 매수 등 명확히 기재)
+- 진입 타점: OOOO원 (또는 구체적인 조건, 예: 20일선 닿을 때)
+- 목표가: OOOO원
+- 손절가: OOOO원 (매수 단가 대비 -O% 수준 등 명확한 기준 제시)
 """
 
 class NewsData(BaseModel): title: str; content: str; source: str; url: str
@@ -157,7 +200,6 @@ def fetch_merged_chart_data(code: str, interval: str):
             
     df_yf = pd.DataFrame()
     try:
-        # 💡 미장 프리/애프터장 포함 옵션 유지
         df_yf = yf.download(yf_ticker, period=yf_per, interval=yf_int, prepost=is_us, progress=False)
         if not df_yf.empty:
             if isinstance(df_yf.columns, pd.MultiIndex): 
@@ -235,13 +277,55 @@ def get_data_with_ttl_cache(code: str, interval: str):
     if not df.empty: CHART_CACHE[cache_key] = (df, now)
     return df, unit
 
+def get_latest_price_snapshot(code: str):
+    """
+    Best-effort "current price" snapshot.
+    Prefer intraday (1m) when available, otherwise fallback to daily (1d).
+    """
+    try:
+        df_1m, unit_1m = get_data_with_ttl_cache(code, "1m")
+        if df_1m is not None and not df_1m.empty and "Close" in df_1m.columns:
+            ts = df_1m.index[-1]
+            return {
+                "price": float(df_1m["Close"].iloc[-1]),
+                "as_of": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                "unit": unit_1m,
+                "interval": "1m",
+            }
+    except Exception:
+        pass
+
+    try:
+        df_1d, unit_1d = get_data_with_ttl_cache(code, "1d")
+        if df_1d is not None and not df_1d.empty and "Close" in df_1d.columns:
+            ts = df_1d.index[-1]
+            as_of = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)
+            return {
+                "price": float(df_1d["Close"].iloc[-1]),
+                "as_of": as_of,
+                "unit": unit_1d,
+                "interval": "1d",
+            }
+    except Exception:
+        pass
+
+    return {"price": None, "as_of": None, "unit": None, "interval": None}
+
 def get_technical_analysis(name: str, code: str) -> str:
     try:
         df, unit = get_data_with_ttl_cache(code, "1d") 
         if df.empty or len(df) < 60: return f"[{name} 데이터 부족]"
         
         close = df['Close']
-        price = round(float(close.iloc[-1]), 2)
+        snap = get_latest_price_snapshot(code)
+        if snap.get("price") is not None:
+            try:
+                unit = snap.get("unit") or unit
+            except Exception:
+                pass
+            price = round(float(snap["price"]), 2)
+        else:
+            price = round(float(close.iloc[-1]), 2)
         ma20 = round(float(close.rolling(20).mean().iloc[-1]), 2)
         ma60 = round(float(close.rolling(60).mean().iloc[-1]), 2)
         
@@ -267,14 +351,58 @@ def get_technical_analysis(name: str, code: str) -> str:
 # ==========================================
 @app.post("/collect")
 def collect_news(data: NewsData):
+    conn = None
     try:
-        if len(supabase.table("news_data").select("id").eq("url", data.url).execute().data) > 0: return {"status": "skipped"}
-        supabase.table("news_data").insert({**data.dict(), "embedding": get_embedding(f"{data.title}\n{data.content}")}).execute()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 중복 체크
+        cur.execute("SELECT id FROM news_data WHERE url = %s", (data.url,))
+        if cur.fetchone():
+            return {"status": "skipped"}
+            
+        # 데이터 삽입 (pgvector 캐스팅 사용)
+        embedding = get_embedding(f"{data.title}\n{data.content}")
+        sql = """
+            INSERT INTO news_data (title, content, source, url, related_stocks, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s::vector)
+        """
+        cur.execute(sql, (data.title, data.content, data.source, data.url, None, str(embedding)))
+        conn.commit()
+        
         return {"status": "success"}
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
 
 @app.post("/collect_index")
-def collect_index(data: IndexData): return {"status": "success"}
+def collect_index(data: IndexData): 
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # index_data 테이블에 지수 이름과 가격 저장
+        sql = """
+            INSERT INTO market_indices (name, price)
+            VALUES (%s, %s)
+        """
+        cur.execute(sql, (data.indexName, data.price))
+        conn.commit()
+        
+        return {"status": "success"}
+    except Exception as e:
+        if conn: conn.rollback()
+        # 에러가 나면 n8n에서 정확한 이유를 볼 수 있게 500 에러를 뱉도록 수정
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
 
 @app.get("/fetch_naver_news")
 def fetch_naver_news(query: str = "증시"):
@@ -288,28 +416,81 @@ def fetch_naver_news(query: str = "증시"):
     return {"status": "success"}
 
 @app.get("/ask_ai")
-async def ask_ai(question: str):
+async def ask_ai(question: str, refresh_news: bool = False):
     try:
         query_vec = get_embedding(question)
         stock_name, stock_code = find_stock(question)
+        sentiment_context = "심리 데이터 없음"
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            # 글로벌 공포와 해당 종목 공포 두 가지를 다 가져옴
+            cur.execute("""
+                (SELECT * FROM market_sentiment WHERE stock_code = 'GLOBAL' ORDER BY id DESC LIMIT 1)
+                UNION ALL
+                (SELECT * FROM market_sentiment WHERE stock_code = %s ORDER BY id DESC LIMIT 1)
+            """, (stock_code,))
+            s_rows = cur.fetchall()
+            if s_rows:
+                sentiment_context = "\n".join([f"- {r['stock_code']} 심리점수: {r['score']}/100 ({r['reason']})" for r in s_rows])
+            cur.close()
+            conn.close()
+        except: pass
         technical_info = get_technical_analysis(stock_name, stock_code) if stock_code else ""
 
-        history_res = supabase.rpc("match_history", {"query_embedding": query_vec, "match_threshold": 0.5, "match_count": 1}).execute()
-        past_analysis = f"과거 질문: {history_res.data[0]['question']}\n과거 답변: {history_res.data[0]['answer']}" if history_res.data else ""
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        search_res = supabase.rpc("match_news", {"query_embedding": query_vec, "match_threshold": 0.3, "match_count": 5}).execute()
-        if len(search_res.data) < 2:
-            fetch_naver_news(query=stock_name if stock_name else question)
-            search_res = supabase.rpc("match_news", {"query_embedding": query_vec, "match_threshold": 0.3, "match_count": 5}).execute()
-        context_news = "\n".join([f"- {n['title']}: {n['content']}" for n in search_res.data])
+        # 💡 1. 한민님의 match_history 함수 호출 (과거 기록 검색)
+        cur.execute("SELECT question, answer FROM match_history(%s::vector, %s, %s)", (str(query_vec), 0.5, 1))
+        history_res = cur.fetchall()
+        past_analysis = f"과거 질문: {history_res[0]['question']}\n과거 답변: {history_res[0]['answer']}" if history_res else ""
+
+        # 💡 2. 질문 타입에 따른 뉴스 검색 분기 처리
+        if stock_code:
+            # [모드 A] 특정 종목을 물어본 경우: 벡터 유사도로 관련 뉴스 5개 검색
+            cur.execute("SELECT title, content FROM match_news(%s::vector, %s, %s)", (str(query_vec), 0.3, 5))
+            search_res = cur.fetchall()
+        else:
+            # [모드 B] 시장/테마를 물어본 경우: 무조건 가장 최근에 수집된 뉴스 15개 긁어오기
+            cur.execute("SELECT title, content FROM news_data ORDER BY created_at DESC LIMIT 15")
+            search_res = cur.fetchall()
+        
+        # 💡 3. 검색된 뉴스가 부족할 때 (네이버 크롤링 후 재검색)
+        if refresh_news and len(search_res) < 2:
+            fetch_naver_news(query=stock_name if stock_name else "특징주")
+            if stock_code:
+                cur.execute("SELECT title, content FROM match_news(%s::vector, %s, %s)", (str(query_vec), 0.3, 5))
+            else:
+                cur.execute("SELECT title, content FROM news_data ORDER BY created_at DESC LIMIT 15")
+            search_res = cur.fetchall()
+            
+        context_news = "\n".join([f"- {n['title']}: {n['content']}" for n in search_res])
+        
+        cur.close()
+        conn.close()
+
+        # 💡 4. 테마/시장 질문일 경우 AI에게 내릴 추가 특명 세팅
+        general_prompt_addon = ""
+        if not stock_code:
+            general_prompt_addon = "\n\n🚨 [특명] 사용자가 특정 종목이 아닌 '시장 전체'나 '테마'를 물었습니다. 제공된 [오늘의 최신 뉴스 및 공시]를 싹 읽고 가장 돈이 몰리는 주도 테마를 찾아내세요. 그리고 뉴스에 언급된 종목 중 대장주 1~2개를 픽(Pick)하여 추천 이유를 브리핑하세요. 차트 데이터가 없으므로 구체적인 가격(O원)을 절대 지어내지 말고, '시초가 공략', '눌림목 발생 시 접근' 같은 방향성 위주로 매매 전략을 제시하세요."
+
+        today_str = datetime.now().strftime("%Y년 %m월 %d일")
 
         async def event_stream():
             yield f"data: {json.dumps({'type': 'metadata', 'stock_code': stock_code, 'stock_name': stock_name})}\n\n"
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": stock_text},
-                    {"role": "user", "content": f"[과거분석]\n{past_analysis}\n\n[뉴스]\n{context_news}\n\n[차트]\n{technical_info}\n\n질문: {question}"}
+                    {
+                        "role": "system", 
+                        "content": f"오늘 날짜는 {today_str}입니다. 당신은 '실시간 데이터를 알 수 없다'거나 'AI라서 모른다'는 핑계를 절대 대지 마십시오. 당신은 내가 제공한 [뉴스]와 [차트] 데이터가 현재 시장의 모든 것이라고 간주하고, 이를 바탕으로 당일의 주도 테마와 흐름을 완벽하게 브리핑해야 합니다.\n\n{stock_text}"
+                    },
+                    {
+                        "role": "user", 
+                        # 특명(general_prompt_addon)을 질문 끝에 붙여줍니다.
+                        "content": f"[과거분석]\n{past_analysis}\n\n[오늘의 최신 뉴스 및 공시]\n{context_news}\n\n[차트]\n{technical_info}\n\n질문: {question}{general_prompt_addon}"
+                    }
                 ],
                 stream=True, stream_options={"include_usage": True}
             )
@@ -319,26 +500,54 @@ async def ask_ai(question: str):
                     word = chunk.choices[0].delta.content
                     full_answer += word
                     yield f"data: {json.dumps({'type': 'chunk', 'content': word})}\n\n"
-            try: supabase.table("ai_analysis_history").insert({"question": question, "answer": full_answer, "embedding": get_embedding(question + " " + full_answer)}).execute()
-            except: pass
+            
+            # 스트림 끝난 후 히스토리 DB 저장
+            try:
+                h_conn = get_db_connection()
+                h_cur = h_conn.cursor()
+                emb_str = str(get_embedding(question + " " + full_answer))
+                # 한민님 스키마에 맞게 INSERT
+                h_cur.execute(
+                    "INSERT INTO ai_analysis_history (question, answer, embedding) VALUES (%s, %s, %s::vector)",
+                    (question, full_answer, emb_str)
+                )
+                h_conn.commit()
+                h_cur.close()
+                h_conn.close()
+            except Exception as e:
+                print("History save error:", e)
+
+            # Signal completion for SSE clients.
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e: 
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/chart_data")
 def get_chart_data(code: str, name: str = "", interval: str = "1d"):
     try:
-        # 1. 메인 차트 데이터 (현재 보고 있는 타임프레임)
-        df, _ = get_data_with_ttl_cache(code, interval)
-        
-        # 2. 💡 피봇 & 고정 지지저항을 위해 '일봉(1d)' 데이터를 무조건 백그라운드에서 가져옵니다.
+        df, unit = get_data_with_ttl_cache(code, interval)
         daily_df, _ = get_data_with_ttl_cache(code, "1d")
 
         if df.empty or len(df) < 2: return {"status": "error", "message": "데이터 부족"}
 
         df = df.copy()
+
+        def interval_to_windows(iv: str):
+            if iv.endswith("m"):
+                try:
+                    step_min = int(iv[:-1])
+                except Exception:
+                    step_min = 1
+                horizons_min = [60, 240, 390]  # 1h / 4h / ~1 trading day
+                return [max(2, int(h / step_min)) for h in horizons_min]
+            if iv == "1w":
+                return [4, 12, 24]
+            if iv == "1M":
+                return [3, 6, 12]
+            return [5, 20, 60]
         
-        # --- 유동 지표 (보고 있는 차트에 맞춰 변함) ---
         df['ma5'] = df['Close'].rolling(5).mean()
         df['ma20'] = df['Close'].rolling(20).mean()
         df['ma60'] = df['Close'].rolling(60).mean()
@@ -352,9 +561,7 @@ def get_chart_data(code: str, name: str = "", interval: str = "1d"):
         loss = (-delta.clip(upper=0)).rolling(14).mean()
         df['rsi'] = 100 - 100 / (1 + gain / loss)
 
-        # --- 💡 고정 지표 (무조건 일봉 기준으로 계산되어 모든 분봉 차트에서 동일한 위치에 고정됨) ---
         if not daily_df.empty and len(daily_df) >= 2:
-            # 기간 지지/저항 (일봉 기준)
             support_5 = float(daily_df['Low'].rolling(5).min().iloc[-1])
             resist_5 = float(daily_df['High'].rolling(5).max().iloc[-1])
             support_20 = float(daily_df['Low'].rolling(20).min().iloc[-1])
@@ -362,7 +569,6 @@ def get_chart_data(code: str, name: str = "", interval: str = "1d"):
             support_60 = float(daily_df['Low'].rolling(60).min().iloc[-1])
             resist_60 = float(daily_df['High'].rolling(60).max().iloc[-1])
 
-            # 당일 피봇 및 지지/저항 (어제(전일) 일봉 캔들 기준)
             prev_day = daily_df.iloc[-2]
             prev_high = float(prev_day['High'])
             prev_low = float(prev_day['Low'])
@@ -378,6 +584,22 @@ def get_chart_data(code: str, name: str = "", interval: str = "1d"):
             pivot = r1 = s1 = r2 = s2 = None
 
         df = df.dropna(subset=['ma20'])
+
+        # Dynamic support/resistance based on requested interval (bars-based windows).
+        sr_levels = []
+        try:
+            windows = interval_to_windows(interval)
+            if "Low" in df.columns and "High" in df.columns:
+                for bars in windows:
+                    if len(df) >= bars:
+                        tail = df.tail(bars)
+                        sr_levels.append({
+                            "bars": int(bars),
+                            "support": float(tail["Low"].min()),
+                            "resist": float(tail["High"].max()),
+                        })
+        except Exception:
+            sr_levels = []
 
         res = []
         is_intraday = interval.endswith('m')
@@ -400,15 +622,23 @@ def get_chart_data(code: str, name: str = "", interval: str = "1d"):
 
         def safe_round(val): return round(val, 2) if val is not None and not pd.isna(val) else None
 
+        primary_sr = sr_levels[0] if sr_levels else None
+
         return {
             "status": "success", "stock_code": code, "stock_name": name,
             "latest": {
+                "as_of": latest["time"], "interval": interval, "unit": unit,
                 "price": latest['close'], "rsi": safe_round(latest['rsi']), "volume_ratio": safe_round(vol_ratio), "ma5": safe_round(latest['ma5']),
-                # 고정 지표들을 프론트로 쏴줍니다
                 "support_5": safe_round(support_5), "resist_5": safe_round(resist_5),
                 "support_20": safe_round(support_20), "resist_20": safe_round(resist_20),
                 "support_60": safe_round(support_60), "resist_60": safe_round(resist_60),
-                "pivot": safe_round(pivot), "s1": safe_round(s1), "s2": safe_round(s2), "r1": safe_round(r1), "r2": safe_round(r2)
+                "pivot": safe_round(pivot), "s1": safe_round(s1), "s2": safe_round(s2), "r1": safe_round(r1), "r2": safe_round(r2),
+                "support_dyn": safe_round(primary_sr["support"]) if primary_sr else None,
+                "resist_dyn": safe_round(primary_sr["resist"]) if primary_sr else None,
+                "sr_levels": [
+                    {"bars": l["bars"], "support": safe_round(l["support"]), "resist": safe_round(l["resist"])}
+                    for l in sr_levels
+                ]
             },
             "history": res
         }
@@ -416,16 +646,18 @@ def get_chart_data(code: str, name: str = "", interval: str = "1d"):
 
 @app.get("/fetch_dart")
 def fetch_dart():
+    conn = None
     try:
         dart_api_key = os.getenv("DART_API_KEY")
         if not dart_api_key:
             return {"status": "error", "message": "DART_API_KEY가 설정되지 않았습니다."}
 
-        # 오늘 날짜 기준으로 검색
         today = datetime.now().strftime("%Y%m%d")
         url = "https://opendart.fss.or.kr/api/list.json"
         
-        # pblntf_ty=B (주요사항보고서: 유/무상증자, 주식취득 등), I (수시공시: 수주, 영업잠정실적 등)
+        conn = get_db_connection()
+        cur = conn.cursor()
+
         for doc_type in ['B', 'I']: 
             params = {
                 "crtfc_key": dart_api_key,
@@ -438,7 +670,6 @@ def fetch_dart():
             
             if res.get('status') == '000' and 'list' in res:
                 for item in res['list']:
-                    # 호재성 키워드가 포함된 공시만 필터링 (순도 100% 유지)
                     title = item['report_nm']
                     good_keywords = ["공급계약", "주식취득", "무상증자", "영업잠정실적", "타법인주식", "공개매수"]
                     
@@ -447,23 +678,28 @@ def fetch_dart():
                         content = f"[{corp_name}] 전자공시: {title}"
                         link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={item['rcp_no']}"
                         
-                        # DB 중복 체크 후 저장 (기존 collect_news 로직 활용)
-                        if len(supabase.table("news_data").select("id").eq("url", link).execute().data) == 0:
-                            supabase.table("news_data").insert({
-                                "title": f"[공시] {corp_name} - {title}",
-                                "content": content,
-                                "source": "DART",
-                                "url": link,
-                                "embedding": get_embedding(f"{corp_name} {title}")
-                            }).execute()
+                        cur.execute("SELECT id FROM news_data WHERE url = %s", (link,))
+                        if not cur.fetchone():
+                            emb_str = str(get_embedding(f"{corp_name} {title}"))
+                            sql = """
+                                INSERT INTO news_data (title, content, source, url, related_stocks, embedding)
+                                VALUES (%s, %s, %s, %s, %s, %s::vector)
+                            """
+                            cur.execute(sql, (f"[공시] {corp_name} - {title}", content, "DART", link, None, emb_str))
+                            conn.commit()
 
         return {"status": "success", "message": "DART 공시 수집 완료"}
     except Exception as e:
+        if conn: conn.rollback()
         return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
 
 @app.get("/fetch_kis_condition")
 def fetch_kis_condition(seq: str = "1"): 
-    # seq는 HTS에서 저장한 조건검색식의 번호입니다 (예: 0, 1, 2...)
+    conn = None
     try:
         token = get_kis_token()
         if not token:
@@ -475,13 +711,13 @@ def fetch_kis_condition(seq: str = "1"):
             "authorization": f"Bearer {token}",
             "appkey": KIS_APP_KEY,
             "appsecret": KIS_APP_SECRET,
-            "tr_id": "HHKST03900400", # 실시간 조건검색 TR ID
+            "tr_id": "HHKST03900400",
             "custtype": "P"
         }
         params = {
             "user_id": os.getenv("KIS_USER_ID"), 
             "seq": seq, 
-            "mac_address": os.getenv("MAC_ADDRESS").replace(":", "").replace("-", "").lower(), # 특수문자 제거
+            "mac_address": os.getenv("MAC_ADDRESS").replace(":", "").replace("-", "").lower(),
             "bpass_chk_yn": "N",
             "clear_cmd_yn": "Y",
             "pblc_cmd_yn": "N",
@@ -492,70 +728,93 @@ def fetch_kis_condition(seq: str = "1"):
 
         res = requests.get(url, headers=headers, params=params).json()
         
-        # 💡 rt_cd가 '0'이면 무조건 통신 성공!
         if res.get('rt_cd') == '0':
             output2 = res.get('output2', [])
             
-            # 포착된 종목이 없을 경우
             if not output2:
                 return {"status": "success", "message": "현재 조건식에 포착된 종목이 없습니다.", "data": []}
             
-            # 포착된 종목이 있을 경우
             detected_stocks = []
             for item in output2:
                 stock_name = item['name']
                 stock_code = item['code']
                 detected_stocks.append(f"{stock_name}({stock_code})")
             
-            # 조건검색에 포착된 종목들을 DB에 리포트로 저장
-            title = f"[조건검색 포착] {len(detected_stocks)}종목 발굴"
-            content = "포착 종목: " + ", ".join(detected_stocks)
+            related_stocks_str = ", ".join(detected_stocks)
             
-            # 💡 위에서 추가했던 related_stocks 태그 컬럼에도 종목을 넣어줍니다.
-            supabase.table("news_data").insert({
-                "title": title,
-                "content": content,
-                "source": "KIS_CONDITION",
-                "url": f"kis_cond_{datetime.now().strftime('%Y%m%d%H%M')}",
-                "related_stocks": ", ".join(detected_stocks), # 태그 저장
-                "embedding": get_embedding(content)
-            }).execute()
-                
-            return {"status": "success", "message": f"{len(detected_stocks)}개 종목 포착", "data": detected_stocks}
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # 🚨 [추가된 핵심 로직] 가장 최근에 저장된 조건검색 결과 가져오기
+            cur.execute("""
+                SELECT related_stocks 
+                FROM news_data 
+                WHERE source = 'KIS_CONDITION' 
+                ORDER BY id DESC LIMIT 1
+            """)
+            last_record = cur.fetchone()
+            
+            # 이전과 포착된 종목이 100% 똑같다면 저장하지 않고 건너뜀 (Skipped)
+            if last_record and last_record[0] == related_stocks_str:
+                return {"status": "skipped", "message": "종목 변동 없음 (DB 저장 생략)", "data": detected_stocks}
+
+            # 🚨 종목에 변화가 생겼을 때만 아래 INSERT 실행
+            title = f"[조건검색 포착] {len(detected_stocks)}종목 발굴"
+            content = "포착 종목: " + related_stocks_str
+            emb_str = str(get_embedding(content))
+            
+            sql = """
+                INSERT INTO news_data (title, content, source, url, related_stocks, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s::vector)
+            """
+            cur.execute(sql, (title, content, "KIS_CONDITION", f"kis_cond_{datetime.now().strftime('%Y%m%d%H%M')}", related_stocks_str, emb_str))
+            conn.commit()
+            
+            return {"status": "success", "message": f"새로운 변동 발생! {len(detected_stocks)}개 종목 저장됨", "data": detected_stocks}
             
         return {"status": "error", "message": res.get('msg1')}
     except Exception as e:
+        if conn: conn.rollback()
         return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
 
 @app.get("/api/ranked_stocks")
 async def get_ranked_stocks():
+    conn = None
     try:
-        # 1. 최근 DB 데이터 50개 긁어오기 (공시, 찌라시, 조건검색 모두 포함)
-        res = supabase.table("news_data").select("title, content, source, related_stocks").order("id", desc=True).limit(50).execute()
-        if not res.data:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("""
+            SELECT title, content, source, related_stocks 
+            FROM news_data 
+            WHERE created_at >= CURRENT_DATE 
+            ORDER BY id DESC LIMIT 50
+        """)
+        res_data = cur.fetchall()
+
+        if not res_data:
             return {"status": "error", "message": "DB에 데이터가 없습니다."}
 
-        # 2. 💡 방금 만든 '태그(related_stocks)'를 활용해 가장 많이 겹치는 핫한 종목 5개 추출!
         all_stocks = []
-        for row in res.data:
+        for row in res_data:
             if row.get('related_stocks') and row['related_stocks'].strip() != 'NONE':
-                # 콤마로 분리해서 리스트에 추가
                 stocks = [s.strip() for s in row['related_stocks'].split(',')]
                 all_stocks.extend(stocks)
         
         if not all_stocks:
              return {"status": "error", "message": "데이터에서 종목 태그를 찾지 못했습니다."}
 
-        # 가장 많이 언급된 종목 Top 5 뽑기
         top_5_tuples = Counter(all_stocks).most_common(5)
-        target_stocks = [t[0] for t in top_5_tuples] # 예: ['삼성전자(005930)', '하이트진로(000080)', ...]
+        target_stocks = [t[0] for t in top_5_tuples]
 
-        # 3. 추출된 Top 5 종목의 최신 기술적 지표(차트) 수집
         stock_contexts = []
         recent_news_text = ""
         
         for stock_str in target_stocks:
-            # "종목명(종목코드)" 형태에서 파싱
             if "(" in stock_str and ")" in stock_str:
                 name = stock_str.split("(")[0]
                 code = stock_str.split("(")[1].replace(")", "")
@@ -566,8 +825,7 @@ async def get_ranked_stocks():
                 tech_info = get_technical_analysis(name, code)
                 stock_contexts.append(f"[{name}({code})]\n{tech_info}")
                 
-                # 이 종목이 포함된 최근 뉴스/공시 텍스트도 컨텍스트에 추가
-                relevant_news = [r for r in res.data if name in (r.get('related_stocks') or '')][:2]
+                relevant_news = [r for r in res_data if r.get('related_stocks') and name in r['related_stocks']][:2]
                 for rn in relevant_news:
                     recent_news_text += f"- [{rn['source']}] {rn['title']}\n"
 
@@ -576,7 +834,6 @@ async def get_ranked_stocks():
 
         combined_tech = "\n\n".join(stock_contexts)
 
-        # 4. AI 퀀트 스코어링 (무조건 JSON 뱉기)
         ranking_prompt = f"""
         당신은 AI 퀀트 엔진입니다. 아래의 [최근 호재/데이터]와 [차트 지표]를 분석하여 각 종목의 단기 상승 확률을 0~100점으로 평가하세요.
         반드시 아래 JSON 형식으로만 응답하세요.
@@ -605,7 +862,7 @@ async def get_ranked_stocks():
         score_res = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": ranking_prompt}],
-            response_format={ "type": "json_object" } # JSON 강제!
+            response_format={ "type": "json_object" }
         )
 
         raw_json = score_res.choices[0].message.content
@@ -616,6 +873,107 @@ async def get_ranked_stocks():
         return {"status": "success", "data": sorted_stocks}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
+
+# ==========================================
+# 7. 심리 분석 및 공포 지수 (추가 기능)
+# ==========================================
+
+class SentimentData(BaseModel):
+    stock_code: str
+    score: float
+    reason: str
+
+@app.get("/fetch_market_sentiment")
+def fetch_market_sentiment(code: str = "GLOBAL", name: str = ""):
+    """
+    GLOBAL이면 VIX 수집, 특정 코드를 넣으면 최근 뉴스 + 차트 데이터 기반으로 GPT가 심리 점수 산출
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        score = 50.0
+        reason = "데이터 부족"
+        vix_val = None
+
+        if code == "GLOBAL":
+            # 1. 매크로 공포 지수 (VIX) 가져오기
+            vix = yf.Ticker("^VIX").history(period="1d", interval="1m")
+            if not vix.empty:
+                vix_val = float(vix['Close'].iloc[-1])
+                # VIX 30 이상이면 공포(20점), 15 이하면 환희(80점)로 변환
+                score = max(0, min(100, 100 - (vix_val * 2))) 
+                reason = f"글로벌 VIX 지수 현재 {vix_val:.2f} 기록 중"
+        else:
+            # 2. 개별 종목 심리 (뉴스 + 차트 데이터 융합 분석)
+            # 💡 [핵심 수정 1] 이름(name) 파라미터를 추가하여 뉴스 '제목(title)'에서도 종목명을 검색하도록 SQL 확장
+            if name:
+                cur.execute(
+                    "SELECT title FROM news_data WHERE related_stocks LIKE %s OR title LIKE %s ORDER BY id DESC LIMIT 10", 
+                    (f"%{code}%", f"%{name}%")
+                )
+            else:
+                cur.execute(
+                    "SELECT title FROM news_data WHERE related_stocks LIKE %s ORDER BY id DESC LIMIT 10", 
+                    (f"%{code}%",)
+                )
+            
+            news_rows = cur.fetchall()
+            titles = [r['title'] for r in news_rows]
+            
+            if titles:
+                # 💡 [핵심 수정 2] 기존에 만들어둔 차트 지표 조회 함수 활용
+                tech_info = get_technical_analysis(name, code) if code else "차트 데이터 없음"
+
+                # 💡 [핵심 수정 3] 뉴스와 차트 지표를 모두 융합하여 더욱 정교한 투자 심리를 분석하도록 프롬프트 고도화
+                analysis_prompt = f"""
+                당신은 냉혹한 주식 투자 심리 분석가입니다.
+                아래의 [최근 뉴스]와 [현재 기술적 지표]를 종합적으로 판단하여 이 종목의 현재 투자자 심리(FOMO, 패닉셀 등)를 0~100점으로 수치화하세요.
+                0은 극단적 공포/패닉, 50은 중립/관망, 100은 극단적 환희/광기입니다.
+                - 뉴스 호재가 있어도 차트(RSI 과매수, 저항선 부근)가 과열 상태면 점수를 보수적으로 잡고,
+                - 악재가 있어도 바닥 지지 및 거래량 폭발이 있으면 반등 기대감으로 점수를 올리세요.
+
+                [최근 뉴스]
+                {titles}
+
+                [기술적 지표]
+                {tech_info}
+
+                반드시 숫자와 한줄 이유만 JSON으로 응답하세요.
+                포맷 예시: {{"score": 85, "reason": "호재 뉴스가 있으나 RSI 75 초과 및 20일선 이격도 과대로 단기 차익매물 출회 우려"}}
+                """
+                
+                res = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": analysis_prompt}],
+                    response_format={"type": "json_object"}
+                )
+                parsed = json.loads(res.choices[0].message.content)
+                score = parsed['score']
+                reason = parsed['reason']
+
+        # 💡 [핵심 수정 4] 뉴스가 없어서 50점이 나온 경우는 DB에 저장하지 않고 스킵 (DB 스팸 방지)
+        if reason != "데이터 부족":
+            cur.execute(
+                "INSERT INTO market_sentiment (stock_code, score, vix_value, reason) VALUES (%s, %s, %s, %s)",
+                (code, score, vix_val, reason)
+            )
+            conn.commit()
+            
+        return {"status": "success", "score": score, "reason": reason, "vix": vix_val}
+
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
 
 @app.get("/debug_mac")
 def debug_mac():
@@ -624,8 +982,12 @@ def debug_mac():
     return {
         "raw": raw,
         "cleaned": cleaned,
-        "length": len(cleaned)  # 반드시 12자리여야 함
+        "length": len(cleaned)
     }
 
 @app.get("/")
-def serve_ui(): return FileResponse("index.html")
+def serve_ui(): return FileResponse("index.html", headers={"Cache-Control": "no-store"})
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
